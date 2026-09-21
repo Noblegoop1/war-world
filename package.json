@@ -1,0 +1,18 @@
+{
+  "name": "openfront-lite",
+  "version": "0.1.0",
+  "description": "A browser-based real-time territory strategy game (OpenFront.io-style) with multiplayer and AI nations.",
+  "main": "server/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
