@@ -50,13 +50,36 @@ account needed; the URL changes every time you start the tunnel). [ngrok](https:
 (`ngrok http 3000`) or [Tailscale](https://tailscale.com) (private network between friends) work
 the same way. WebSockets go through these tunnels fine.
 
-### 3. Port forwarding or a cloud server (permanent)
+### 3. Host it on a website (permanent URL, nobody has to run anything)
 
-* **Port forward**: forward TCP port 3000 on your router to your PC, then friends use
-  `http://<your public IP>:3000`.
-* **Cloud**: the server is a single Node process that reads `PORT` from the environment, so it
-  deploys as-is to Railway, Render, Fly.io, a $5 VPS, etc. (`npm install && npm start`). Put it
-  behind HTTPS (the client automatically uses `wss://` on https pages).
+The server is one Node process that reads `PORT` from the environment, so any Node host works.
+Push this folder to a GitHub repo first (the hosts deploy from it):
+
+```bash
+git remote add origin https://github.com/<you>/openfront-lite.git
+git push -u origin main
+```
+
+**Render (free, easiest)** — <https://render.com> → *New +* → *Blueprint* → pick the repo.
+`render.yaml` in this folder configures everything; you get `https://openfront-lite.onrender.com`.
+Free instances sleep after ~15 min idle, so the first visitor waits ~30–60 s for it to wake up
+(the game pings itself while people are playing so it won't sleep mid-game).
+
+**Railway (~$5/mo, never sleeps)** — <https://railway.app> → *New Project* → *Deploy from GitHub
+repo*. It auto-detects Node and `npm start`; open *Settings → Networking → Generate Domain*.
+
+**Fly.io (pay-as-you-go, ~$2/mo)** — install `flyctl`, then `fly launch --copy-config --yes` and
+`fly deploy` (uses `fly.toml` + `Dockerfile`).
+
+**Any VPS / Docker host** — `docker build -t openfront-lite . && docker run -p 80:3000 openfront-lite`,
+or plain `npm ci && PORT=80 npm start` behind Caddy/nginx for HTTPS.
+
+Notes for a public server: every redeploy restarts the process and ends running games (state is
+in memory); a 512 MB instance comfortably runs several medium-map games; `MAX_LOBBIES` (default
+50) caps how many lobbies can exist at once.
+
+* **Port forward** (alternative, from home): forward TCP 3000 on your router to your PC; friends
+  use `http://<your public IP>:3000`.
 
 The server holds any number of lobbies at once; every lobby has its own map and simulation.
 
