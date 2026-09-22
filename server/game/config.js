@@ -4,7 +4,9 @@
 
 const TerrainType = { WATER: 0, PLAINS: 1, HIGHLAND: 2, MOUNTAIN: 3 };
 const PlayerType = { HUMAN: 'human', NATION: 'nation', BOT: 'bot' };
-const UnitType = { CITY: 'city', PORT: 'port', DEFENSE_POST: 'defense', SILO: 'silo', SAM: 'sam' };
+const UnitType = { CITY: 'city', PORT: 'port', DEFENSE_POST: 'defense', SILO: 'silo', SAM: 'sam', LAB: 'lab', WALL: 'wall', MECH: 'mech' };
+// Structures that count as "population" (a nation's civilian centers). Labs & walls can't be built near these.
+const POPULATION_TYPES = ['city'];
 const NukeType = { ATOM: 'atom', HYDROGEN: 'hydrogen' };
 const Difficulty = { EASY: 'easy', MEDIUM: 'medium', HARD: 'hard', IMPOSSIBLE: 'impossible' };
 
@@ -130,20 +132,60 @@ class Config {
       case UnitType.DEFENSE_POST: return 50;
       case UnitType.SILO: return 100;
       case UnitType.SAM: return 300;
+      case UnitType.LAB: return 100;
+      case UnitType.MECH: return 80;
       default: return 0;
     }
   }
+  // Mass Production research: all buildings cost 15% less.
+  buildDiscount(player) { return player && player.researches && player.researches.has('mass_production') ? 0.85 : 1; }
   unitCost(type, numOwned, player) {
     if (player && player.type === PlayerType.HUMAN && this.infiniteGold()) return 0;
+    const d = this.buildDiscount(player);
     switch (type) {
-      case UnitType.CITY: return Math.min(1000000, Math.pow(2, numOwned) * 125000);
-      case UnitType.PORT: return Math.min(1000000, Math.pow(2, numOwned) * 125000);
-      case UnitType.DEFENSE_POST: return Math.min(250000, (numOwned + 1) * 50000);
-      case UnitType.SILO: return 1000000;
-      case UnitType.SAM: return Math.min(3000000, (numOwned + 1) * 1500000);
+      case UnitType.CITY: return Math.min(1000000, Math.pow(2, numOwned) * 125000) * d;
+      case UnitType.PORT: return Math.min(1000000, Math.pow(2, numOwned) * 125000) * d;
+      case UnitType.DEFENSE_POST: return Math.min(250000, (numOwned + 1) * 50000) * d;
+      case UnitType.SILO: return 1000000 * d;
+      case UnitType.SAM: return Math.min(3000000, (numOwned + 1) * 1500000) * d;
+      case UnitType.LAB: return 1000000 * d;
+      // Mechs are national-scale assets: brutally expensive, escalating hard per mech owned.
+      case UnitType.MECH: return (2000000 + numOwned * 2500000) * (player && player.researches && player.researches.has('mech_production') ? 0.6 : 1) * d;
       default: return 0;
     }
   }
+  // Wall segments: near-exponential in the number of wall tiles already built.
+  wallSegmentCost(numWallTiles, player) {
+    if (player && player.type === PlayerType.HUMAN && this.infiniteGold()) return 0;
+    return Math.floor((2000 + 400 * numWallTiles) * Math.pow(1.012, numWallTiles) * this.buildDiscount(player));
+  }
+  wallMaxHp() { return 60000; }
+  labResearchTicks() { return 60 * TICKS_PER_SECOND; } // 60s to complete a research
+  labCooldownTicks() { return 45 * TICKS_PER_SECOND; }
+  maxResearchesPerPlayer() { return 2; }
+  populationRequiredForLab() { return 3; }
+  structureMinGap() { return 3; }        // labs/walls can't be within this many tiles of a population building
+  labMinGapFromPopulation() { return 6; }
+
+  // ---- Mechs (every nation has them from the start) ----
+  mechBaseHp(player) {
+    let hp = 8000;
+    if (player && player.researches) { if (player.researches.has('heavy_mech')) hp *= 2.2; }
+    return hp;
+  }
+  mechSpeed(player) {
+    let s = 0.6; // tiles/tick
+    if (player && player.researches) { if (player.researches.has('heavy_mech')) s *= 0.6; }
+    return s;
+  }
+  mechRange(player) { return player && player.researches && player.researches.has('longrange_mech') ? 14 : 3; }
+  mechTroopDamagePerTick(player) {
+    let d = 1200; // damage dealt to enemy troops per tick while engaged
+    if (player && player.researches && player.researches.has('mech_weapons')) d *= 1.6;
+    return d;
+  }
+  mechTroopDamageResist() { return 0.15; } // mechs take only 15% of the troop loss a normal tile would inflict
+  mechConquerBonus(player) { return player && player.researches && player.researches.has('assault_mech') ? 3 : 1; } // vs defended land
   nukeCost(type, player) {
     if (player && player.type === PlayerType.HUMAN && this.infiniteGold()) return 0;
     return type === NukeType.HYDROGEN ? 5000000 : 750000;
@@ -247,7 +289,38 @@ class Config {
   }
 }
 
+// Research augments. `impl:true` = fully wired into the sim this build; others are staged (pickable, effect noted).
+// `weight` biases the random 3-of pool. `tags` help the AI pick sensibly for its strategy.
+const RESEARCH = [
+  { id: 'war_economy', name: 'War Economy', impl: true, tags: ['econ', 'aggro'],
+    desc: '+30% gold income while you are attacking an enemy nation.' },
+  { id: 'mass_production', name: 'Mass Production', impl: true, tags: ['econ', 'build'],
+    desc: 'All buildings cost 15% less gold.' },
+  { id: 'defensive_position', name: 'Defensive Position', impl: true, tags: ['defense'],
+    desc: 'Defense Posts fight back on their own, hurting nearby attackers by 15% of your troops. Click one to reinforce.' },
+  { id: 'heavy_mech', name: 'Heavy Mech Doctrine', impl: true, tags: ['mech', 'defense'],
+    desc: 'Your Mechs are slower but far more durable (2.2× HP).' },
+  { id: 'assault_mech', name: 'Assault Mech Doctrine', impl: true, tags: ['mech', 'aggro'],
+    desc: 'Your Mechs tear through defended and walled territory 3× faster.' },
+  { id: 'mech_production', name: 'Mech Production', impl: true, tags: ['mech', 'econ'],
+    desc: 'Mechs cost 40% less, so you can field more of them.' },
+  { id: 'mech_weapons', name: 'Mech Weapons Systems', impl: true, tags: ['mech', 'aggro'],
+    desc: 'Mechs deal 60% more damage to enemy troops.' },
+  { id: 'longrange_mech', name: 'Long-Range Mech Systems', impl: true, tags: ['mech'],
+    desc: 'Mechs gain a long strike range and can hit land from farther away.' },
+  { id: 'dday', name: 'D-Day', impl: true, tags: ['navy', 'aggro'],
+    desc: 'Boat invasions land with +15% troops, and can carry more.' },
+  { id: 'coastal_bombardment', name: 'Coastal Bombardment', impl: false, tags: ['navy', 'aggro'],
+    desc: 'Warships stay at sea and bombard coastal enemy land within range; only enemy warships can stop them. (Staged — needs warship art)' },
+  // Staged (pickable; deep implementation on the roadmap — need art/VFX):
+  { id: 'submarine_warfare', name: 'Submarine Warfare', impl: false, tags: ['navy'],
+    desc: 'Unlock invisible Submarines that fire volleys of short-range missiles and slip past SAMs. (Staged)' },
+  { id: 'strategic_bombers', name: 'Strategic Bombers', impl: false, tags: ['air', 'aggro'],
+    desc: 'An air force that bombs enemy Cities, Factories and Silos at range. (Staged)' },
+];
+const RESEARCH_BY_ID = Object.fromEntries(RESEARCH.map((r) => [r.id, r]));
+
 module.exports = {
-  TerrainType, PlayerType, UnitType, NukeType, Difficulty, TICKS_PER_SECOND, DEFAULT_SETTINGS, sanitizeSettings,
-  Config, within, HUMAN_COLORS, NATION_COLORS, BOT_COLORS,
+  TerrainType, PlayerType, UnitType, POPULATION_TYPES, NukeType, Difficulty, TICKS_PER_SECOND, DEFAULT_SETTINGS, sanitizeSettings,
+  Config, within, HUMAN_COLORS, NATION_COLORS, BOT_COLORS, RESEARCH, RESEARCH_BY_ID,
 };

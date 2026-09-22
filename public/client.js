@@ -122,12 +122,18 @@ const UNIT_INFO = {
   defense: { label: 'Defense Post', key: '3', desc: 'Attackers within 30 tiles lose 5x troops and advance 3x slower.', cost: (n) => Math.min(250000, (n + 1) * 50000) },
   silo: { label: 'Missile Silo', key: '4', desc: 'Launches atom and hydrogen bombs (90 tick reload).', cost: () => 1000000 },
   sam: { label: 'SAM Launcher', key: '5', desc: 'Shoots down nukes within 70 tiles.', cost: (n) => Math.min(3e6, (n + 1) * 1500000) },
+  lab: { label: 'Research Lab', key: '6', desc: 'Needs 3 Cities, built away from them. Offers a choice of 3 researches (max 2 per game); each takes 60s, then the lab cools down.', cost: () => 1000000 },
+  wall: { label: 'Wall', key: '7', desc: 'Drag to draw a line. Enemies must grind each segment down and cannot pass behind it. Cost climbs steeply the more wall you own. Nukes raze walls.', cost: () => 0 },
+  mech: { label: 'Mech', key: '8', desc: 'A walking war machine. Autonomous: hunts the nearest hostile land, crushes troops and walls, shrugs off most troop damage. Extremely expensive.', cost: (n) => 2000000 + n * 2500000 },
 };
 const NUKE_INFO = {
-  atom: { label: 'Atom Bomb', key: '6', desc: 'Destroys everything within 12 tiles, most within 30. Needs a ready silo.', cost: 750000 },
-  hydrogen: { label: 'Hydrogen Bomb', key: '7', desc: 'Destroys everything within 80 tiles, most within 100. Needs a ready silo.', cost: 5000000 },
+  atom: { label: 'Atom Bomb', key: '9', desc: 'Destroys everything within 12 tiles, most within 30. Needs a ready silo.', cost: 750000 },
+  hydrogen: { label: 'Hydrogen Bomb', key: '0', desc: 'Destroys everything within 80 tiles, most within 100. Needs a ready silo.', cost: 5000000 },
 };
-const HOTBAR = ['city', 'port', 'defense', 'silo', 'sam', 'atom', 'hydrogen'];
+const HOTBAR = ['city', 'port', 'defense', 'silo', 'sam', 'lab', 'wall', 'mech', 'atom', 'hydrogen'];
+// Unit-type -> icon used for shapes/hotbar (labs and mechs reuse existing glyphs until custom art lands)
+const ICON_FOR = { city: 'city', port: 'port', defense: 'defense', silo: 'silo', sam: 'sam', lab: 'info', wall: 'build', mech: 'target', atom: 'atom', hydrogen: 'hydrogen' };
+let RESEARCH_DEFS = []; // sent by the server at game start
 
 // =============================================================================
 // Networking
@@ -169,6 +175,7 @@ function handleMessage(m) {
     case 'start': startGame(m); break;
     case 'tick': applyTick(m); break;
     case 'ctl': G.ctl = { paused: m.paused, speed: m.speed }; renderTopRight(); break;
+    case 'wallQuote': if (wallDraw) wallDraw.quote = m; break;
     case 'ended': G.active = false; show('lobby'); if (lobby) renderLobby(); break;
     default: break;
   }
@@ -294,6 +301,12 @@ function startGame(m) {
   const ob = b64ToBytes(s.owner);
   G.owner = new Uint16Array(ob.buffer, ob.byteOffset, ob.byteLength / 2);
   G.fallout = b64ToBytes(s.fallout);
+  G.wall = new Uint8Array(G.W * G.H);
+  if (s.walls) { const wb = b64ToBytes(s.walls); const wh = new Uint16Array(wb.buffer, wb.byteOffset, wb.byteLength / 2); for (let i = 0; i < wh.length; i++) if (wh[i]) G.wall[i] = 1; }
+  G.mechs = m.state.mechs || [];
+  RESEARCH_DEFS = s.research || [];
+  wallDraw = null;
+  closeResearchPicker();
   G.me = m.you;
   G.tick = s.tick; G.phase = s.phase; G.spawnLeft = Math.max(0, s.spawnTicks - s.tick);
   G.settings = s.settings;
@@ -320,7 +333,7 @@ function startGame(m) {
   ownerCanvas = document.createElement('canvas'); ownerCanvas.width = G.W; ownerCanvas.height = G.H;
   ownerCtx = ownerCanvas.getContext('2d');
   ownerImg = ownerCtx.createImageData(G.W, G.H);
-  for (let i = 0; i < G.W * G.H; i++) if (G.owner[i] || G.fallout[i]) paintTile(i);
+  for (let i = 0; i < G.W * G.H; i++) if (G.owner[i] || G.fallout[i] || G.wall[i]) paintTile(i);
   ownerDirty = true;
   show('game');
   needFit = true;
@@ -368,12 +381,14 @@ function paintTile(i) {
   }
   const p = G.players.get(o);
   if (!p) { d[k + 3] = 0; return; }
+  if (G.wall[i]) { d[k] = 58; d[k + 1] = 58; d[k + 2] = 66; d[k + 3] = 255; return; } // wall: dark stone
   if (isBorder(i)) { d[k] = p.border[0]; d[k + 1] = p.border[1]; d[k + 2] = p.border[2]; d[k + 3] = 255; }
   else { d[k] = p.rgb[0]; d[k + 1] = p.rgb[1]; d[k + 2] = p.rgb[2]; d[k + 3] = 150; }
 }
 function setTile(i, val) {
-  G.owner[i] = val & 0x7fff;
+  G.owner[i] = val & 0x3fff;
   G.fallout[i] = val & 0x8000 ? 1 : 0;
+  G.wall[i] = val & 0x4000 ? 1 : 0;
   const W = G.W, x = i % W, y = (i / W) | 0;
   paintTile(i);
   if (x > 0) paintTile(i - 1);
@@ -388,6 +403,10 @@ function applyStats(stats) {
     const p = G.players.get(s[0]);
     if (!p) continue;
     p.troops = s[1]; p.gold = s[2]; p.tiles = s[3]; p.flags = s[4]; p.maxTroops = s[5]; p.allies = s[6] || []; p.income = s[7] || 0;
+    const r = s[8] || [[], null, null];
+    p.researches = r[0] || []; p.researching = r[1]; p.choices = r[2];
+    p.atk = s[9] || 0; p.eco = s[10] || 0; p.walls = s[11] || 0; p.mechCount = s[12] || 0;
+    if (p.sm === G.me && p.choices && p.choices.length && !researchPickerOpen) openResearchPicker(p.choices);
     p.spawned = !!(s[4] & 1); p.alive = !!(s[4] & 2); p.traitor = !!(s[4] & 4); p.offline = !!(s[4] & 8);
   }
 }
@@ -409,6 +428,7 @@ function applyTick(m) {
   if (m.boats) G.boats = m.boats;
   if (m.trade) G.trade = m.trade;
   if (m.nukes) G.nukes = m.nukes;
+  if (m.mechs) G.mechs = m.mechs;
   if (m.allyReqs) syncAllyRequests(m.allyReqs.filter((r) => r[1] === net.id).map((r) => r[0]));
   if (m.events) for (const e of m.events) handleEvent(e);
   if (m.winner !== undefined) G.winner = m.winner;
@@ -437,9 +457,16 @@ function handleEvent(e) {
     case 'donate': logEvent(`${esc(pname(e.from))} sent ${e.troops ? fmt(e.troops) + ' troops' : ''}${e.troops && e.gold ? ' and ' : ''}${e.gold ? fmt(e.gold) + ' gold' : ''} to ${esc(pname(e.to))}`, e.to === G.me ? 'good' : ''); break;
     case 'trade': logEvent(`Trade ship arrived: +${fmt(e.gold)} gold (with ${esc(pname(e.p))})`, 'good'); break;
     case 'win': logEvent(`🏆 ${esc(pname(e.p))} won the game!`, e.p === G.me ? 'good' : ''); break;
+    case 'labBuilt': if (e.p === G.me) logEvent('Research Lab built — a choice of researches will appear when it is ready.', 'good'); break;
+    case 'researchOffer': openResearchPicker(e.choices); break;
+    case 'researchStart': logEvent(`${esc(pname(e.p))} began researching <b>${esc(researchName(e.id))}</b>`, e.p === G.me ? 'good' : ''); break;
+    case 'researchDone': logEvent(`${esc(pname(e.p))} completed <b>${esc(researchName(e.id))}</b>`, e.p === G.me ? 'good' : ''); break;
+    case 'mech': logEvent(`${esc(pname(e.by))} deployed a <b>Mech</b>`, e.by === G.me ? 'good' : 'bad'); break;
+    case 'mechLost': logEvent(`${esc(pname(e.p))} lost a Mech`, e.p === G.me ? 'bad' : 'good'); break;
     default: break;
   }
 }
+function researchName(id) { const r = RESEARCH_DEFS.find((x) => x.id === id); return r ? r.name : id; }
 function logEvent(html, cls = '', buttons = null) {
   const log = $('event-log');
   const d = document.createElement('div');
@@ -535,10 +562,15 @@ function renderAttacks() {
 }
 function myUnitCount(type) { let n = 0; for (const u of G.units) if (u[1] === type && u[2] === G.me) n++; return n; }
 function haveReadySilo() { return G.units.some((u) => u[1] === 'silo' && u[2] === G.me && u[5] === 0 && u[6] === 0); }
+function myMechCount() { const p = me(); return p ? (p.mechCount || 0) : 0; }
 function itemCost(key) {
   const infinite = G.settings && G.settings.infiniteGold;
   if (infinite) return 0;
-  return UNIT_INFO[key] ? UNIT_INFO[key].cost(myUnitCount(key)) : NUKE_INFO[key].cost;
+  const p = me();
+  const disc = p && p.researches && p.researches.includes('mass_production') ? 0.85 : 1;
+  if (key === 'wall') return wallDraw && wallDraw.quote ? wallDraw.quote.cost : 0;
+  if (key === 'mech') return UNIT_INFO.mech.cost(myMechCount()) * (p && p.researches && p.researches.includes('mech_production') ? 0.6 : 1) * disc;
+  return (UNIT_INFO[key] ? UNIT_INFO[key].cost(myUnitCount(key)) : NUKE_INFO[key].cost) * (UNIT_INFO[key] ? disc : 1);
 }
 function renderHotbar() {
   const p = me();
@@ -548,10 +580,12 @@ function renderHotbar() {
     if (nukesOff && (key === 'silo' || key === 'sam' || NUKE_INFO[key])) return '';
     const info = UNIT_INFO[key] || NUKE_INFO[key];
     const cost = itemCost(key);
-    const can = p && p.gold >= cost && (!NUKE_INFO[key] || haveReadySilo());
-    const active = placement && ((placement.kind === 'build' && placement.unit === key) || (placement.kind === 'nuke' && placement.type === key));
-    const count = UNIT_INFO[key] ? myUnitCount(key) : '';
-    return `<div class="hb ${active ? 'active' : ''} ${can ? '' : 'cant'}" data-key="${key}"><span class="key">${info.key}</span><img src="${iconURL[key] || ''}" alt=""><span class="count">${count}</span></div>`;
+    let can = p && p.gold >= cost && (!NUKE_INFO[key] || haveReadySilo());
+    if (key === 'lab' && p && (myUnitCount('city') < 3 || (p.researches && p.researches.length + (p.researching ? 1 : 0) >= 2))) can = false;
+    if (key === 'wall') can = !!p;
+    const active = placement && ((placement.kind === 'build' && placement.unit === key) || (placement.kind === 'nuke' && placement.type === key) || (placement.kind === 'wall' && key === 'wall'));
+    const count = key === 'mech' ? myMechCount() : key === 'wall' ? (p ? p.walls || 0 : 0) : UNIT_INFO[key] ? myUnitCount(key) : '';
+    return `<div class="hb ${active ? 'active' : ''} ${can ? '' : 'cant'}" data-key="${key}"><span class="key">${info.key}</span><img src="${iconURL[ICON_FOR[key] || key] || ''}" alt=""><span class="count">${count}</span></div>`;
   }).join('');
   if (bar.dataset.html !== html) {
     bar.innerHTML = html;
@@ -565,15 +599,18 @@ function renderHotbar() {
 }
 function showHotbarTip(key) {
   const info = UNIT_INFO[key] || NUKE_INFO[key];
-  $('hotbar-tip').innerHTML = `<b>${info.label} <span class="muted">[${info.key}]</span></b>${esc(info.desc)}<div class="cost">${fmt(itemCost(key))} gold</div>`;
+  const costTxt = key === 'wall' ? 'from ~2K per tile, climbing steeply' : `${fmt(itemCost(key))} gold`;
+  $('hotbar-tip').innerHTML = `<b>${info.label} <span class="muted">[${info.key}]</span></b>${esc(info.desc)}<div class="cost">${costTxt}</div>`;
   $('hotbar-tip').classList.remove('hidden');
 }
 function togglePlacement(key) {
-  const kind = UNIT_INFO[key] ? 'build' : 'nuke';
-  if (placement && ((placement.kind === 'build' && placement.unit === key) || (placement.kind === 'nuke' && placement.type === key))) placement = null;
-  else placement = kind === 'build' ? { kind, unit: key } : { kind, type: key };
+  const kind = key === 'wall' ? 'wall' : UNIT_INFO[key] ? 'build' : 'nuke';
+  const same = placement && ((placement.kind === 'build' && placement.unit === key) || (placement.kind === 'nuke' && placement.type === key) || (placement.kind === 'wall' && key === 'wall'));
+  wallDraw = null;
+  if (same) placement = null;
+  else placement = kind === 'build' ? { kind, unit: key } : kind === 'nuke' ? { kind, type: key } : { kind };
   renderHotbar();
-  if (placement) toast(`Click on the map to place ${(UNIT_INFO[key] || NUKE_INFO[key]).label} (Esc to cancel)`, true);
+  if (placement) toast(kind === 'wall' ? 'Wall mode: click-and-drag on your land to draw a wall (Esc to cancel)' : `Click on the map to place ${(UNIT_INFO[key] || NUKE_INFO[key]).label} (Esc to cancel)`, true);
 }
 $('ratio').addEventListener('input', (e) => { ratio = Number(e.target.value) / 100; renderHud(); });
 function setRatio(r) { ratio = clamp(r, 0.01, 1); $('ratio').value = Math.round(ratio * 100); renderHud(); }
@@ -587,9 +624,17 @@ function playerCardHtml(sm) {
   const badge = flagBadge(q);
   const rel = p && p.sm !== sm ? (p.allies.includes(sm) ? ' · <span style="color:#b9f6ca">Ally</span>' : '') : (p && p.sm === sm ? ' · You' : '');
   let html = `<div class="pc-head">${badge}<span>${esc(q.name)}</span><span class="muted" style="font-weight:400;font-size:12px">${q.type === 'nation' ? 'Nation' : q.type === 'bot' ? 'Bot' : 'Player'}${rel}${q.traitor ? ' · <span style="color:#ff9e93">Traitor</span>' : ''}${q.alive ? '' : ' · Eliminated'}</span>${G.leaderSm === sm ? ' 👑' : ''}</div>`;
+  // The two headline numbers: how dangerous they are right now, and how rich they're getting.
+  html += `<div class="pc-power"><div class="pw atk" title="Attack power: troops at home + mechs + silos + defenses + military research. Drops while their forces are away fighting."><span class="pw-l">⚔ ATK POWER</span><span class="pw-v">${fmt(q.atk || 0)}</span></div><div class="pw eco" title="Economy: gold per second from land, trade ports and research."><span class="pw-l">💰 ECONOMY</span><span class="pw-v">${fmt(q.eco || 0)}/s</span></div></div>`;
   html += `<div class="pc-stats"><span>💰 <b>${fmt(q.gold)}</b></span><span>⚔ <b>${fmt(q.troops)}</b> / ${fmt(q.maxTroops)}</span><span>🗺 <b>${(100 * q.tiles / G.numLand).toFixed(1)}%</b> (${fmt(q.tiles)})</span><span>📈 +${fmt(q.income)}/s</span></div>`;
-  const uhtml = Object.keys(UNIT_INFO).filter((k) => counts[k]).map((k) => `<span><img src="${iconURL[k] || ''}" alt="">${counts[k]}</span>`).join('');
+  let uhtml = Object.keys(UNIT_INFO).filter((k) => counts[k] && k !== 'wall' && k !== 'mech').map((k) => `<span title="${UNIT_INFO[k].label}"><img src="${iconURL[ICON_FOR[k] || k] || ''}" alt="">${counts[k]}</span>`).join('');
+  if (q.mechCount) uhtml += `<span title="Mechs"><img src="${iconURL.target || ''}" alt="">${q.mechCount} mech${q.mechCount > 1 ? 's' : ''}</span>`;
+  if (q.walls) uhtml += `<span title="Wall tiles"><img src="${iconURL.build || ''}" alt="">${q.walls} wall</span>`;
   if (uhtml) html += `<div class="pc-units">${uhtml}</div>`;
+  // Research: what they've unlocked and what's cooking (visible to everyone, like OpenFront's info panel)
+  const rs = (q.researches || []).map((id) => `<span class="rs done" title="${esc((RESEARCH_DEFS.find((r) => r.id === id) || {}).desc || '')}">${esc(researchName(id))}</span>`).join('');
+  const rp = q.researching ? `<span class="rs prog">${esc(researchName(q.researching[0]))} · ${Math.ceil(q.researching[1] / 10)}s</span>` : '';
+  if (rs || rp) html += `<div class="pc-research">🔬 ${rs}${rp}</div>`;
   if (p && p.alive && q.alive && p.sm !== sm) {
     html += `<div class="pc-actions">`;
     if (p.allies.includes(sm)) {
@@ -655,6 +700,32 @@ $('btn-spectate').onclick = () => $('game-over').classList.add('hidden');
 $('btn-back-lobby').onclick = () => { if (isHost()) send({ t: 'endGame' }); else { G.active = false; show('lobby'); renderLobby(); } };
 
 // =============================================================================
+// Research picker (TFT-augment style: three cards, pick one)
+// =============================================================================
+let researchPickerOpen = false;
+function openResearchPicker(choices) {
+  if (!choices || !choices.length) return;
+  researchPickerOpen = true;
+  const el = $('research-picker');
+  const cards = choices.map((id) => {
+    const r = RESEARCH_DEFS.find((x) => x.id === id) || { id, name: id, desc: '', tags: [], impl: true };
+    const tag = (r.tags && r.tags[0]) || 'misc';
+    return `<div class="rcard tag-${tag}" data-id="${esc(id)}">
+      <div class="rcard-tag">${esc(tag.toUpperCase())}${r.impl === false ? ' · STAGED' : ''}</div>
+      <div class="rcard-name">${esc(r.name)}</div>
+      <div class="rcard-desc">${esc(r.desc)}</div>
+      <button class="primary">Research</button>
+    </div>`;
+  }).join('');
+  el.innerHTML = `<div class="rp-inner"><div class="rp-head"><h2>Choose a Research</h2><span class="muted">Takes 60s. You get ${2} researches per game.</span></div><div class="rp-cards">${cards}</div><div class="muted small-text">You can decide later — press Esc to close; the lab keeps the offer open.</div></div>`;
+  el.querySelectorAll('.rcard').forEach((c) => {
+    c.onclick = () => { send({ t: 'research', id: c.dataset.id }); closeResearchPicker(); toast(`Researching ${researchName(c.dataset.id)}…`, true); };
+  });
+  el.classList.remove('hidden');
+}
+function closeResearchPicker() { researchPickerOpen = false; $('research-picker').classList.add('hidden'); }
+
+// =============================================================================
 // Radial menu (right-click)
 // =============================================================================
 const radialEl = $('radial');
@@ -696,6 +767,9 @@ function openRadial(tile, sx, sy) {
   const center = { html: `<b>${esc(ownerName)}</b><span class="muted">${q ? fmt(q.troops) + ' troops' : land ? 'land' : ''}</span>` };
   if (o === G.me && land) {
     items.push({ icon: 'build', label: 'Build', cls: 'build', onClick: () => openBuildRadial(tile, sx, sy) });
+    if (p.choices && p.choices.length) items.push({ icon: 'info', label: 'Research!', cls: 'build', onClick: () => { openResearchPicker(p.choices); closeRadial(); } });
+    items.push({ icon: 'target', label: 'Deploy Mech', cost: itemCost('mech'), disabled: p.gold < itemCost('mech'), title: UNIT_INFO.mech.desc, onClick: () => { send({ t: 'build', unit: 'mech', tile }); closeRadial(); } });
+    items.push({ icon: 'build', label: 'Draw Wall', title: UNIT_INFO.wall.desc, onClick: () => { closeRadial(); if (!placement || placement.kind !== 'wall') togglePlacement('wall'); } });
     const u = G.unitByTile.get(tile);
     if (u && (u[1] === 'city' || u[1] === 'port')) items.push({ icon: u[1], label: 'Upgrade', cost: itemCost(u[1]), onClick: () => { send({ t: 'build', unit: u[1], tile }); closeRadial(); } });
     items.push({ icon: 'info', label: 'Info', onClick: () => { pinnedCard = G.me; renderPlayerCard(G.me, true); closeRadial(); } });
@@ -726,8 +800,11 @@ function openBuildRadial(tile, sx, sy) {
   const items = [];
   for (const key of Object.keys(UNIT_INFO)) {
     if (nukesOff && (key === 'silo' || key === 'sam')) continue;
+    if (key === 'wall' || key === 'mech') continue; // those live on the main ring
     const cost = itemCost(key);
-    items.push({ icon: key, label: UNIT_INFO[key].label, cost, disabled: p.gold < cost, title: UNIT_INFO[key].desc, onClick: () => { send({ t: 'build', unit: key, tile }); closeRadial(); } });
+    let disabled = p.gold < cost;
+    if (key === 'lab' && (myUnitCount('city') < 3 || (p.researches || []).length + (p.researching ? 1 : 0) >= 2)) disabled = true;
+    items.push({ icon: ICON_FOR[key] || key, label: UNIT_INFO[key].label, cost, disabled, title: UNIT_INFO[key].desc, onClick: () => { send({ t: 'build', unit: key, tile }); closeRadial(); } });
   }
   radialItems(items, { html: `<b>Build</b><span class="muted">back</span>`, onClick: () => openRadial(tile, sx, sy) }, sx, sy);
 }
@@ -753,14 +830,46 @@ function screenToTile(sx, sy) {
   return wy * G.W + wx;
 }
 const mouse = { down: false, button: 0, sx: 0, sy: 0, lastX: 0, lastY: 0, dragging: false, x: 0, y: 0 };
+// ---- wall drawing (click-drag a line on your own land, like drawing a road) ----
+let wallDraw = null; // { start, tiles, quote, lastQuoteAt }
+function lineTiles(a, b) {
+  // 4-connected path from tile a to tile b: walk the long axis first, then the short one (an L / staircase)
+  let x0 = tileX(a), y0 = tileY(a); const x1 = tileX(b), y1 = tileY(b);
+  const out = [a];
+  const dx = Math.sign(x1 - x0), dy = Math.sign(y1 - y0);
+  const nx = Math.abs(x1 - x0), ny = Math.abs(y1 - y0);
+  // staircase so the wall follows the diagonal instead of a hard L
+  let ix = 0, iy = 0;
+  while (ix < nx || iy < ny) {
+    if (ix < nx && (iy >= ny || (ix + 1) / (nx + 1) <= (iy + 1) / (ny + 1))) { x0 += dx; ix++; } else { y0 += dy; iy++; }
+    out.push(y0 * G.W + x0);
+    if (out.length > 400) break;
+  }
+  return out;
+}
+function updateWallQuote(force) {
+  if (!wallDraw) return;
+  const now = performance.now();
+  if (!force && now - (wallDraw.lastQuoteAt || 0) < 150) return;
+  wallDraw.lastQuoteAt = now;
+  send({ t: 'wallQuote', tiles: wallDraw.tiles });
+}
 canvas.addEventListener('mousedown', (e) => {
   mouse.down = true; mouse.button = e.button; mouse.sx = mouse.lastX = e.clientX; mouse.sy = mouse.lastY = e.clientY; mouse.dragging = false;
+  if (e.button === 0 && placement && placement.kind === 'wall' && G.phase === 'play') {
+    const t = screenToTile(e.clientX, e.clientY);
+    if (t >= 0 && G.owner[t] === G.me) { wallDraw = { start: t, tiles: [t], quote: null, lastQuoteAt: 0 }; updateWallQuote(true); }
+  }
 });
 window.addEventListener('mousemove', (e) => {
   mouse.x = e.clientX; mouse.y = e.clientY;
   if (screen !== 'game') return;
   hoverTile = e.target === canvas ? screenToTile(e.clientX, e.clientY) : -1;
   if (!mouse.down) return;
+  if (wallDraw) { // drawing a wall: extend the line instead of panning
+    if (hoverTile >= 0 && hoverTile !== wallDraw.tiles[wallDraw.tiles.length - 1]) { wallDraw.tiles = lineTiles(wallDraw.start, hoverTile); updateWallQuote(false); }
+    return;
+  }
   const dx = e.clientX - mouse.lastX, dy = e.clientY - mouse.lastY;
   if (!mouse.dragging && Math.hypot(e.clientX - mouse.sx, e.clientY - mouse.sy) > 5) mouse.dragging = true;
   if (mouse.dragging) { cam.x += dx; cam.y += dy; }
@@ -769,6 +878,11 @@ window.addEventListener('mousemove', (e) => {
 window.addEventListener('mouseup', (e) => {
   if (!mouse.down) return;
   mouse.down = false;
+  if (wallDraw) { // finish the wall
+    if (wallDraw.tiles.length >= 1) send({ t: 'wall', tiles: wallDraw.tiles });
+    wallDraw = null;
+    return;
+  }
   if (screen !== 'game' || mouse.dragging || e.target !== canvas) return;
   if (e.button === 0) onLeftClick(e.clientX, e.clientY, e.shiftKey);
   else if (e.button === 2) onRightClick(e.clientX, e.clientY);
@@ -797,6 +911,7 @@ function onLeftClick(sx, sy, shift) {
     return;
   }
   if (placement) {
+    if (placement.kind === 'wall') return; // walls are drawn by dragging
     if (placement.kind === 'build') send({ t: 'build', unit: placement.unit, tile });
     else send({ t: 'nuke', type: placement.type, tile });
     if (!keys.shift) { placement = null; renderHotbar(); }
@@ -811,7 +926,7 @@ function onLeftClick(sx, sy, shift) {
   send({ t: 'attack', tile, ratio }); // server falls back to a boat when not reachable by land
 }
 function onRightClick(sx, sy) {
-  if (placement) { placement = null; renderHotbar(); return; }
+  if (placement) { placement = null; wallDraw = null; renderHotbar(); return; }
   if (!radialEl.classList.contains('hidden')) { closeRadial(); return; }
   const tile = screenToTile(sx, sy);
   if (tile < 0 || G.phase === 'spawn') return;
@@ -825,12 +940,12 @@ window.addEventListener('keydown', (e) => {
   if (typing) return;
   const k = e.key.toLowerCase();
   if (e.key === 'Enter') { openChat(); e.preventDefault(); return; }
-  if (e.key === 'Escape') { closeRadial(); placement = null; renderHotbar(); pinnedCard = 0; $('player-card').classList.add('hidden'); $('settings-popup').classList.add('hidden'); return; }
+  if (e.key === 'Escape') { closeRadial(); closeResearchPicker(); placement = null; wallDraw = null; renderHotbar(); pinnedCard = 0; $('player-card').classList.add('hidden'); $('settings-popup').classList.add('hidden'); return; }
   if (k === 'a') { if (hoverTile >= 0 && G.phase === 'play') send({ t: 'attack', tile: hoverTile, ratio }); return; }
   if (k === 'b') { if (hoverTile >= 0 && G.phase === 'play') send({ t: 'boat', tile: hoverTile, ratio }); return; }
   if (k === 'r') { const inc = G.attacks.filter((a) => a[2] === G.me); if (inc.length) { const a = inc[inc.length - 1]; const l = G.labels.get(a[1]); send({ t: 'attackPlayer', p: a[1], ratio }); void l; } return; }
   if (k === 'c') { centerOn(G.me); return; }
-  if (/^[1-9]$/.test(e.key)) { const key = HOTBAR[Number(e.key) - 1]; if (key) togglePlacement(key); return; }
+  if (/^[0-9]$/.test(e.key)) { const idx = e.key === '0' ? 9 : Number(e.key) - 1; const key = HOTBAR[idx]; if (key) togglePlacement(key); return; }
   if (e.key === '+' || e.key === '=') zoomAt(window.innerWidth / 2, window.innerHeight / 2, 1.25);
   if (e.key === '-') zoomAt(window.innerWidth / 2, window.innerHeight / 2, 0.8);
   if (e.key === '[') setRatio(ratio - 0.05);
@@ -897,6 +1012,20 @@ function draw() {
     ctx.strokeStyle = 'rgba(255,60,60,0.5)'; ctx.beginPath(); ctx.arc(hx, hy, outer, 0, Math.PI * 2); ctx.stroke();
   }
 
+  if (wallDraw) { // wall being drawn: green if affordable/valid, red otherwise
+    const ok = !wallDraw.quote || wallDraw.quote.ok;
+    ctx.fillStyle = ok ? 'rgba(120, 220, 120, 0.7)' : 'rgba(240, 80, 80, 0.7)';
+    for (const t of wallDraw.tiles) ctx.fillRect(tileX(t), tileY(t), 1, 1);
+  } else if (placement && placement.kind === 'wall' && hoverTile >= 0) {
+    ctx.fillStyle = G.owner[hoverTile] === G.me ? 'rgba(120, 220, 120, 0.6)' : 'rgba(240, 80, 80, 0.5)';
+    ctx.fillRect(tileX(hoverTile), tileY(hoverTile), 1, 1);
+  }
+  if (placement && placement.kind === 'build' && placement.unit === 'mech' && hoverTile >= 0) {
+    ctx.strokeStyle = G.owner[hoverTile] === G.me ? 'rgba(120,220,120,0.9)' : 'rgba(240,80,80,0.9)';
+    ctx.lineWidth = 1.5 / cam.zoom;
+    ctx.beginPath(); ctx.arc(tileX(hoverTile) + 0.5, tileY(hoverTile) + 0.5, 3, 0, Math.PI * 2); ctx.stroke();
+  }
+
   // ---- screen space ----
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   const toScreen = (wx, wy) => [cam.x + wx * cam.zoom, cam.y + wy * cam.zoom];
@@ -919,8 +1048,13 @@ function draw() {
       ctx.lineWidth = Math.max(1.5, r / 6);
       ctx.strokeStyle = cooldown > 0 ? '#ff5252' : p.borderHex;
       ctx.stroke();
-      const ic = icons[type];
+      const ic = icons[ICON_FOR[type] || type];
       if (ic && r >= 7) { const s = r * 1.15; ctx.drawImage(ic, x - s / 2, y - s / 2, s, s); }
+      if (type === 'lab' && cooldown > 0 && building === 0) { // research in progress / cooling down
+        const total = 105 * 10;
+        ctx.beginPath(); ctx.arc(x, y, r + 3, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * (1 - cooldown / total));
+        ctx.strokeStyle = '#9ad0ff'; ctx.lineWidth = 2.5; ctx.stroke();
+      }
       ctx.globalAlpha = 1;
       if (level > 1 && r >= 8) {
         ctx.font = `bold ${Math.max(9, r * 0.8)}px system-ui, sans-serif`;
@@ -979,6 +1113,34 @@ function draw() {
     ctx.beginPath(); ctx.arc(x, y, Math.max(6, e.r * cam.zoom * (0.3 + 0.7 * k)), 0, Math.PI * 2);
     ctx.fillStyle = `rgba(255,${Math.floor(200 - 150 * k)},50,${0.55 * (1 - k)})`; ctx.fill();
     ctx.strokeStyle = `rgba(255,255,255,${1 - k})`; ctx.lineWidth = 2; ctx.stroke();
+  }
+  // mechs (placeholder art: armored hexagon with a crosshair glyph and an HP bar)
+  for (const mch of G.mechs) {
+    const [, ownerSm, mx, my, hp, maxHp, engaged] = mch;
+    const p = G.players.get(ownerSm);
+    const [x, y] = toScreen(mx, my);
+    if (!visible(x, y)) continue;
+    const r = clamp(7 * cam.zoom, 9, 24);
+    if (engaged) { ctx.beginPath(); ctx.arc(x, y, r * 1.5 + 2 * Math.sin(now / 120), 0, Math.PI * 2); ctx.strokeStyle = 'rgba(255,80,80,0.8)'; ctx.lineWidth = 2; ctx.stroke(); }
+    shapePath('lab', x, y, r); // hexagon body
+    ctx.fillStyle = '#23262d'; ctx.fill();
+    ctx.lineWidth = Math.max(2, r / 5); ctx.strokeStyle = p ? p.color : '#fff'; ctx.stroke();
+    const ic = icons.target;
+    if (ic) { const s = r * 1.2; ctx.drawImage(ic, x - s / 2, y - s / 2, s, s); }
+    // HP bar
+    const bw = r * 2.2, bh = Math.max(3, r / 4);
+    ctx.fillStyle = 'rgba(0,0,0,0.7)'; ctx.fillRect(x - bw / 2, y - r - bh - 3, bw, bh);
+    ctx.fillStyle = hp / maxHp > 0.5 ? '#4caf50' : hp / maxHp > 0.25 ? '#f5c542' : '#e53935';
+    ctx.fillRect(x - bw / 2, y - r - bh - 3, bw * clamp(hp / maxHp, 0, 1), bh);
+  }
+  // wall drawing cost label follows the cursor
+  if (wallDraw && wallDraw.quote) {
+    const txt = wallDraw.quote.ok ? `${wallDraw.tiles.length} tiles · ${fmt(wallDraw.quote.cost)} gold` : wallDraw.quote.reason;
+    ctx.font = 'bold 13px "Segoe UI", system-ui, sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'bottom';
+    const w = ctx.measureText(txt).width + 12;
+    ctx.fillStyle = wallDraw.quote.ok ? 'rgba(20,60,20,0.9)' : 'rgba(80,20,20,0.9)';
+    ctx.fillRect(mouse.x + 12, mouse.y - 30, w, 22);
+    ctx.fillStyle = '#fff'; ctx.fillText(txt, mouse.x + 18, mouse.y - 12);
   }
   // labels
   if (opts.labels) {

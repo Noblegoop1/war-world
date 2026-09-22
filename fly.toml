@@ -1,5 +1,5 @@
 # Fly.io: install flyctl, run `fly launch --copy-config --yes` then `fly deploy`.
-app = "frontier"
+app = "war-world"
 primary_region = "iad"
 
 [build]

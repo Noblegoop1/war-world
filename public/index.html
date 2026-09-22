@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Frontier</title>
+<title>War World</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="stylesheet" href="/style.css">
 </head>
@@ -12,8 +12,8 @@
 <div id="screen-menu" class="screen">
   <div class="menu-wrap">
     <div class="panel menu-panel">
-      <h1>FRONTIER</h1>
-      <p class="sub">Real-time territory strategy. Expand, build, trade, ally, betray, nuke.</p>
+      <h1>WAR WORLD</h1>
+      <p class="sub">Nation-scale warfare. Expand, build, research doctrines, wall your borders, field Mechs, nuke.</p>
       <label class="field">Your name <input id="name-input" maxlength="20" placeholder="Player"></label>
       <div class="row">
         <button id="btn-create" class="primary big">Create game</button>
@@ -32,7 +32,11 @@
         <li><b>Spawn:</b> click on land during the spawn phase. Re-click to move until the timer ends.</li>
         <li><b>Expand / attack:</b> <b>left-click</b> any land you don't own. The slider (or <kbd>Shift</kbd>+scroll) sets how many troops you send. Neutral land is cheap; players cost troops on both sides. If the target isn't reachable by land, a boat is sent automatically.</li>
         <li><b>Right-click</b> opens the radial menu: build, boat, alliance, donate, info.</li>
-        <li><b>Build</b> with keys <kbd>1</kbd>–<kbd>7</kbd> or the bottom bar, then click a tile. Cities raise max troops, ports send trade ships for gold, defense posts make attackers bleed, silos launch nukes, SAMs shoot nukes down.</li>
+        <li><b>Build</b> with keys <kbd>1</kbd>–<kbd>0</kbd> or the bottom bar, then click a tile. Cities raise max troops, ports send trade ships for gold, defense posts make attackers bleed, silos launch nukes, SAMs shoot nukes down.</li>
+        <li><b>Walls</b> <kbd>7</kbd>: click-and-drag on your land to draw a line. Enemies must grind every segment down and can't pass behind it. Price climbs steeply with how much wall you own; nukes raze them.</li>
+        <li><b>Mechs</b> <kbd>8</kbd>: hugely expensive walking war machines that hunt hostile land on their own, crush troops and walls, and shrug off most troop fire. Killable by nukes, other mechs and massed troops.</li>
+        <li><b>Research Lab</b> <kbd>6</kbd>: needs 3 Cities, built away from them. Pick 1 of 3 random doctrines (Mech doctrines, War Economy, Mass Production, D-Day, …). Max 2 per game, 60s each.</li>
+        <li><b>Click any nation</b> to see its <b>ATK POWER</b> and <b>ECONOMY</b> — attack power drops while its forces are away fighting.</li>
         <li><kbd>A</kbd> attack under cursor · <kbd>B</kbd> boat under cursor · <kbd>R</kbd> retaliate against your latest attacker · <kbd>C</kbd> center on you · <kbd>Enter</kbd> chat · <kbd>Esc</kbd> close.</li>
         <li><b>Win</b> by owning 80% of the land (configurable). A player squeezed under 100 tiles is conquered outright.</li>
       </ul>
@@ -153,6 +157,7 @@
   <div id="hotbar-tip" class="hud hidden"></div>
 
   <div id="radial" class="hidden"></div>
+  <div id="research-picker" class="overlay hidden"></div>
   <div id="toasts"></div>
   <div id="spectate-banner" class="hidden"></div>
 

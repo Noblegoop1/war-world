@@ -1,7 +1,7 @@
 {
-  "name": "frontier",
+  "name": "war-world",
   "version": "0.1.0",
-  "description": "Frontier: a real-time browser territory-strategy game built on OpenFront.io mechanics, with online multiplayer and AI nations.",
+  "description": "War World: a real-time browser nation-warfare strategy game built on OpenFront.io mechanics, with walls, mechs, research doctrines, online multiplayer and AI nations.",
   "main": "server/index.js",
   "type": "commonjs",
   "scripts": {

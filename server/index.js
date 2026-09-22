@@ -255,7 +255,27 @@ class Lobby {
       }
       case 'build': {
         if (tile === null) return;
-        const r = g.build(p, String(m.unit), tile);
+        const unit = String(m.unit);
+        const r = unit === 'mech' ? g.buildMech(p, tile) : g.build(p, unit, tile);
+        if (!r.ok) c.send({ t: 'toast', msg: r.reason });
+        break;
+      }
+      case 'wall': {
+        // a drawn line of tiles; validated server-side for ownership, contiguity and cost
+        const tiles = Array.isArray(m.tiles) ? m.tiles.slice(0, 400).map(Number) : [];
+        const r = g.buildWall(p, tiles);
+        if (!r.ok) c.send({ t: 'toast', msg: r.reason });
+        break;
+      }
+      case 'wallQuote': {
+        // cost preview while the player is drawing
+        const tiles = Array.isArray(m.tiles) ? m.tiles.slice(0, 400).map(Number) : [];
+        const r = g.canBuildWall(p, tiles);
+        c.send({ t: 'wallQuote', ok: r.ok, cost: r.ok ? Math.floor(r.cost) : 0, reason: r.reason || '' });
+        break;
+      }
+      case 'research': {
+        const r = g.pickResearch(p, String(m.id));
         if (!r.ok) c.send({ t: 'toast', msg: r.reason });
         break;
       }
@@ -431,7 +451,7 @@ function lanAddresses() {
 }
 
 server.listen(PORT, () => {
-  console.log(`Frontier server running:`);
+  console.log(`War World server running:`);
   console.log(`  local:  http://localhost:${PORT}`);
   for (const a of lanAddresses()) console.log(`  LAN:    http://${a}:${PORT}`);
 });

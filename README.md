@@ -1,11 +1,12 @@
-# Frontier
+# War World
 
-A browser-based, real-time (not turn-based) territory-strategy game built on the mechanics of
-[OpenFront.io](https://github.com/openfrontio/OpenFrontIO): claim a spot on a world map, expand
-tile by tile, and try to hold 80% of the land. Overreach and you run out of troops; sit still and
+A browser-based, real-time **nation-vs-nation** strategy game built on the mechanics of
+[OpenFront.io](https://github.com/openfrontio/OpenFrontIO) and pushed further: claim a spot on a
+world map, expand tile by tile, wall your borders, field walking **Mechs**, research national
+**doctrines**, and try to hold 80% of the land. Overreach and you run out of troops; sit still and
 your neighbours swallow you. Play with friends online against dozens of AI nations and bot tribes.
 
-Frontier reuses OpenFront's real map data, unit sprites and UI icons (CC BY‑SA 4.0) and reproduces
+War World reuses OpenFront's real map data, unit sprites and UI icons (CC BY‑SA 4.0) and reproduces
 its balance — the troop-growth curve, the per-tile attack cost/speed formula, unit prices, trade
 income, difficulty scaling — in an original, from-scratch codebase. No build step, no framework:
 Node.js + `ws` on the server, a plain HTML5 canvas on the client.
@@ -36,6 +37,29 @@ Open <http://localhost:3000>, pick a name, **Create game**, choose a map, **Star
   * **Defense Post** — attackers within 30 tiles lose 5× troops and move 3× slower.
   * **Missile Silo** — launches atom / hydrogen bombs (90-tick reload).
   * **SAM Launcher** — shoots down incoming nukes within 70 tiles.
+* **Walls** (key **7**) — click-and-drag on your own land to draw a line, like laying a road.
+  Enemy attacks must grind each segment's HP down and **cannot pass tiles behind it**, so a wall
+  across a choke point seals it. Each new segment costs more than the last (near-exponential in how
+  much wall you own), walls can't sit next to Cities, and any nuke razes them. AI nations wall the
+  front facing a serious attacker.
+* **Mechs** (key **8**) — every nation can field them from the start: walking war machines that cost
+  **2M+ gold each, escalating**. They're **autonomous**: a Mech hunts the nearest hostile land,
+  conquers tiles in a radius, drains enemy troops, punches through walls and defense posts, and
+  takes only ~15% of the damage ordinary troops would inflict. They die to nukes, other Mechs, and
+  massed troops. AI nations deploy them on Medium+ (more on Hard/Impossible).
+* **Research Lab** (key **6**) — needs **3 Cities** and must be built away from them. When ready it
+  offers **3 random researches** (TFT-augment style); pick one, it takes 60s, then the lab cools
+  down. **Max 2 researches per game.** Everyone can see a nation's researches on its info card.
+  Live doctrines: War Economy (+30% gold while attacking), Mass Production (-15% build costs),
+  Defensive Position (defense posts fight back with 15% of your troops), Heavy / Assault Mech
+  Doctrine, Mech Production, Mech Weapons Systems, Long-Range Mech Systems, D-Day (+15% troops on
+  boat landings). Staged (pickable, deep mechanics pending art): Coastal Bombardment, Submarine
+  Warfare, Strategic Bombers. AI picks by strategy (mech nations take mech doctrines, poor nations
+  take economy, besieged nations take defense).
+* **Nation info card** — hover or click any nation: besides gold/troops/land it shows two headline
+  numbers. **ATK POWER** = troops at home + Mechs + silos + defenses + military research, and it
+  **drops while that nation's forces are away fighting**. **ECONOMY** = gold per second from land,
+  trade ports and research.
 * **Alliances** — request from a player's radial or the leaderboard. Allies can't attack each other
   and can donate troops/gold. Breaking one marks you a **traitor** for 30s (weaker defense). Nuking
   an ally breaks the alliance.
@@ -43,12 +67,13 @@ Open <http://localhost:3000>, pick a name, **Create game**, choose a map, **Star
   conquered outright — the attacker takes their land and half their gold.
 
 **Keys:** `A` attack under cursor · `B` boat under cursor · `R` retaliate against your latest
-attacker · `C` centre on your territory · `1‑7` build · `[` `]` or Shift+scroll attack ratio ·
+attacker · `C` centre on your territory · `1‑5` structures, `6` lab, `7` wall, `8` mech, `9`/`0`
+nukes · `[` `]` or Shift+scroll attack ratio ·
 `Enter` chat · `Esc` close · drag / wheel to pan & zoom.
 
 ## Maps
 
-Frontier ships five OpenFront maps (World, Europe, Asia, Oceania, Pangaea) and can download ~35
+War World ships five OpenFront maps (World, Europe, Asia, Oceania, Pangaea) and can download ~35
 more on demand (Africa, the Americas, individual countries, Mars, Luna, …) — they're cached to
 `server/maps-cache/` after first use. Each real map places its actual nations (with country flags)
 where they belong. There are also three procedurally generated map types (Continents, Islands,
@@ -84,7 +109,7 @@ then:
   it won't sleep mid-match.
 * **Railway (~$5/mo, never sleeps)** — *New Project* → *Deploy from GitHub repo* → *Generate Domain*.
 * **Fly.io** — `fly launch --copy-config --yes` then `fly deploy` (uses `fly.toml` + `Dockerfile`).
-* **Any VPS / Docker** — `docker build -t frontier . && docker run -p 80:3000 frontier`.
+* **Any VPS / Docker** — `docker build -t warworld . && docker run -p 80:3000 warworld`.
 
 Every redeploy restarts the process and ends running games (state is in memory), so push between
 sessions. `MAX_LOBBIES` (default 50) caps concurrent games; a 512 MB instance handles several.
@@ -100,14 +125,26 @@ nukes/boats and infinite gold/troops/instant-build sandbox play.
 
 ```
 server/index.js        HTTP + WebSocket server, lobbies, host controls, intent handling, flag proxy
-server/game/config.js  All balance numbers, formulas and colour palettes
+server/game/config.js  All balance numbers, formulas, colour palettes, research definitions
 server/game/maps.js    Map catalog + loader (OpenFront .bin format) + procedural generator
-server/game/game.js    Simulation: players, attacks, boats, trade, structures, nukes, alliances
-server/game/ai.js      Nation AI and bot AI
-public/                Client: menu/lobby UI, canvas renderer, radial menu, input
+server/game/game.js    Simulation: players, attacks, boats, trade, structures, walls, mechs,
+                       research, nukes, alliances, attack/economy power
+server/game/ai.js      Nation AI (incl. walls, mechs, research picks) and bot AI
+public/                Client: menu/lobby UI, canvas renderer, radial menu, research picker, input
 public/assets/         OpenFront icons & sprites (CC BY-SA 4.0)
 server/maps/           Five bundled OpenFront maps (CC BY-SA 4.0)
+ART_TODO.md            Every placeholder that needs real art / VFX / SFX, with paths and specs
 ```
+
+## Roadmap (staged researches & units)
+
+Designed and pickable, but the deep mechanics wait on art (see `ART_TODO.md`): **Coastal
+Bombardment** (warships stay at sea and shell coastal land), **Submarine Warfare** (invisible subs
+firing missile volleys that bypass SAMs), **Strategic Bombers / air power**, **Carrier Doctrine**,
+**Naval Mines**, building transformations (Port -> Naval Base, Defense Post -> Coastal Defense
+Network, City -> Military District), **Tactical Nukes**, **Hardened Infrastructure**, **Military
+Rail / Strategic Logistics**, clicking a Defense Post to reinforce it, and walls slowing your own
+troops to 50% when crossing.
 
 ## Credits
 

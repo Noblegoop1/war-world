@@ -266,6 +266,7 @@ class NationAI {
   handleStructures() {
     const g = this.game, p = this.p;
     if (this.placements > 0 && this.tryBuildDefensePost()) return;
+    if (this.placements > 0 && this.maybeBuildWall()) return;
     if (g.tick - this.lastStructureTick < 80) return;
     const built = this.doHandleStructures();
     if (built) { this.lastStructureTick = g.tick; this.placements++; }
@@ -357,11 +358,93 @@ class NationAI {
     }
     // keep a nuke fund once we own a silo
     const reserve = silos > 0 ? this.cfg.nukeCost(NukeType.ATOM, p) * 1.3 : 0;
+    // Research Lab: a mid-game milestone once we have 3 cities and a research slot left.
+    const labs = p.unitsOf(UnitType.LAB).length;
+    if (this.difficulty !== Difficulty.EASY && labs < 1 && g.populationCount(p) >= this.cfg.populationRequiredForLab() && p.researchCount() < this.cfg.maxResearchesPerPlayer()) {
+      const cost = this.cfg.unitCost(UnitType.LAB, labs, p);
+      if (p.gold >= cost + reserve) {
+        for (let i = 0; i < 12; i++) { const t = this.randomInnerTile(); if (t !== null && g.build(p, UnitType.LAB, t).ok) return true; }
+      } else if (cities >= 4) return false; // save up for the lab
+    }
+    // Mechs: Hard/Impossible field them once the economy can bear it; Medium occasionally.
+    if (this.difficulty !== Difficulty.EASY && (this.hardOrWorse || this.rng.chance(3))) {
+      const maxMechs = this.difficulty === Difficulty.IMPOSSIBLE ? 3 : this.difficulty === Difficulty.HARD ? 2 : 1;
+      const mechCost = this.cfg.unitCost(UnitType.MECH, p.mechs.length, p);
+      if (p.mechs.length < maxMechs && cities >= 2 && p.gold >= mechCost + reserve) {
+        const t = this.randomInnerTile();
+        if (t !== null && g.buildMech(p, t).ok) return true;
+      }
+    }
     if ((troopRatio > 0.6 || cities === 0) && p.gold >= this.cfg.unitCost(UnitType.CITY, cities, p) + reserve) {
       const t = this.randomInnerTile();
       if (t !== null && g.build(p, UnitType.CITY, t).ok) return true;
     }
     return false;
+  }
+
+  // Research choice: pick the option that best fits what we already have / are doing.
+  pickResearch(choices) {
+    const p = this.p;
+    if (this.difficulty === Difficulty.EASY) return choices[this.rng.int(0, choices.length - 1)];
+    const { RESEARCH_BY_ID } = require('./config');
+    const score = (id) => {
+      const r = RESEARCH_BY_ID[id];
+      if (!r) return -1;
+      let s = r.impl ? 10 : 0; // prefer researches that actually do something now
+      const underAttack = p.incomingAttacks.length > 0;
+      const hasMechs = p.mechs.length > 0;
+      const coastal = this.shoreTiles(p, 1, true).length > 0;
+      for (const tag of r.tags) {
+        if (tag === 'mech' && hasMechs) s += 8;
+        if (tag === 'mech' && !hasMechs) s -= 4;
+        if (tag === 'defense' && underAttack) s += 7;
+        if (tag === 'aggro' && this.hardOrWorse) s += 4;
+        if (tag === 'econ') s += p.gold < 500000 ? 6 : 2;
+        if (tag === 'navy' && !coastal) s -= 10;
+        if (tag === 'navy' && coastal && this.hardOrWorse) s += 3;
+      }
+      return s + this.rng.int(0, 3);
+    };
+    return choices.slice().sort((a, b) => score(b) - score(a))[0];
+  }
+
+  // Walls: when a strong attack is coming, wall the stretch of border facing the attacker.
+  maybeBuildWall() {
+    const g = this.game, p = this.p;
+    if (this.difficulty === Difficulty.EASY) return false;
+    const land = p.incomingAttacks.filter((a) => a.sourceTile === null && !a.done);
+    if (!land.length || p.troops <= 0) return false;
+    const incoming = land.reduce((s, a) => s + a.troops, 0);
+    // wall up when the threat is real; Hard+ nations also fortify proactively against any land attack
+    if (incoming < p.troops * 0.25 && !(this.hardOrWorse && this.rng.chance(4))) return false;
+    if (p.numWallTiles > 60 + (this.hardOrWorse ? 60 : 0)) return false;
+    if (p.gold < this.cfg.wallSegmentCost(p.numWallTiles, p) * 6) return false;
+    const attackerSm = land[0].attacker.smallID;
+    // collect our border tiles touching the attacker, then walk a connected run of them
+    const front = [];
+    const b = [0, 0, 0, 0];
+    for (const t of p.border) {
+      const n = g.neighbors4(t, b);
+      for (let k = 0; k < n; k++) if (g.owner[b[k]] === attackerSm) { front.push(t); break; }
+      if (front.length > 300) break;
+    }
+    if (front.length < 4) return false;
+    const frontSet = new Set(front);
+    const start = front[this.rng.int(0, front.length - 1)];
+    const line = [start];
+    const used = new Set([start]);
+    while (line.length < 24) {
+      const last = line[line.length - 1];
+      const n = g.neighbors4(last, b);
+      let next = -1;
+      for (let k = 0; k < n; k++) if (frontSet.has(b[k]) && !used.has(b[k])) { next = b[k]; break; }
+      if (next < 0) break;
+      line.push(next); used.add(next);
+    }
+    if (line.length < 4) return false;
+    const c = g.canBuildWall(p, line);
+    if (!c.ok) return false;
+    return g.buildWall(p, line).ok;
   }
 
   // ---- nukes ------------------------------------------------------------------

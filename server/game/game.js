@@ -3,7 +3,7 @@
 const { Rng, hashString } = require('./rng');
 const {
   TerrainType, PlayerType, UnitType, NukeType, Config, within, TICKS_PER_SECOND,
-  HUMAN_COLORS, NATION_COLORS, BOT_COLORS,
+  HUMAN_COLORS, NATION_COLORS, BOT_COLORS, RESEARCH, RESEARCH_BY_ID,
 } = require('./config');
 const { IS_LAND, SHORELINE, OCEAN, MAG_MASK, IMPASSABLE } = require('./maps');
 
@@ -88,8 +88,16 @@ class Player {
     this.conqueredBy = null;
     this.nationSpawn = null; // {x,y} from the map manifest
     this.goldEarned = 0;
+    this.mechs = [];
+    this.researches = new Set();   // completed research ids
+    this.research = null;          // in-progress: { id, doneTick } or null
+    this.researchCooldownUntil = 0;
+    this.pendingChoices = null;    // 3 research ids offered to a human, awaiting pick
+    this.goldRate = 0;             // last computed gold/tick (for the economy stat)
+    this.numWallTiles = 0;
   }
   get numTiles() { return this.tiles.size; }
+  researchCount() { return this.researches.size + (this.research ? 1 : 0); }
   get alive() { return this.spawned && this.tiles.size > 0; }
   isTraitor() { return this.game.tick < this.traitorUntil; }
   isFriendly(other) { return other === this || this.allies.has(other.id); }
@@ -135,6 +143,7 @@ class Game {
     this.numLand = map.numLand;
     this.owner = new Uint16Array(this.width * this.height);
     this.fallout = new Uint8Array(this.width * this.height);
+    this.wallHp = new Uint16Array(this.width * this.height); // 0 = no wall; >0 = wall HP (owned by owner[tile])
     this.numFallout = 0;
     this.rng = new Rng((map.seed ^ 0x5bd1e995) >>> 0);
     this.tick = 0;
@@ -148,6 +157,7 @@ class Game {
     this.units = [];
     this.unitByTile = new Map();
     this.nukes = [];
+    this.mechs = [];
     this.allianceRequests = new Map();
     this.events = [];
     this.changedTiles = [];
@@ -258,6 +268,7 @@ class Game {
     }
     this.owner[tile] = p.smallID;
     if (this.fallout[tile]) { this.fallout[tile] = 0; this.numFallout--; }
+    if (this.wallHp[tile]) { this.wallHp[tile] = 0; this.numWallTiles = Math.max(0, this.numWallTiles - 1); } // a conquered wall is razed
     p.tiles.add(tile);
     this.changedTiles.push(tile);
     this.updateBorder(tile);
@@ -276,6 +287,7 @@ class Game {
     prev.tiles.delete(tile);
     prev.border.delete(tile);
     this.owner[tile] = 0;
+    if (this.wallHp[tile]) { this.wallHp[tile] = 0; this.numWallTiles = Math.max(0, this.numWallTiles - 1); }
     this.changedTiles.push(tile);
     const b = this.nbuf, n = this.neighbors4(tile, b);
     for (let k = 0; k < n; k++) this.updateBorder(b[k]);
@@ -387,7 +399,11 @@ class Game {
     for (const p of this.players) {
       if (!p.alive) continue;
       p.addTroops(this.config.troopIncreaseRate(p));
-      p.addGold(this.config.goldAdditionRate(p));
+      let g = this.config.goldAdditionRate(p);
+      // War Economy: +30% income while attacking an enemy nation.
+      if (p.researches.has('war_economy') && p.outgoingAttacks.some((a) => a.target && !a.done)) g *= 1.3;
+      p.goldRate = g; // base income (trade/conquest gold is added on top elsewhere)
+      p.addGold(g);
     }
     for (const u of this.units) {
       if (u.constructionLeft > 0) { u.constructionLeft--; if (u.constructionLeft === 0) this.unitsChanged = true; }
@@ -397,6 +413,9 @@ class Game {
     this.tickBoats();
     this.tickTrade();
     this.tickNukes();
+    this.tickMechs();
+    this.tickResearch();
+    this.tickDefensivePosition();
     this.expireAllianceRequests();
     for (const p of this.players) if (p.ai && p.alive) p.ai.tick();
     this.checkDeaths();
@@ -418,6 +437,7 @@ class Game {
         p.deathTick = this.tick;
         for (const a of p.outgoingAttacks) a.done = true;
         for (const u of [...p.units]) this.removeUnit(u);
+        for (const mech of this.mechs) if (mech.owner === p) mech.done = true;
         this.events.push({ k: 'death', p: p.smallID, by: p.conqueredBy ? p.conqueredBy.smallID : 0 });
       }
     }
@@ -544,6 +564,17 @@ class Game {
         const n = this.neighbors4(tile, a.nbuf);
         for (let i = 0; i < n; i++) if (this.owner[a.nbuf[i]] === mySm) { onBorder = true; break; }
         if (!onBorder) continue;
+        // A wall must be broken down before the tile can be taken, and it blocks tiles behind it.
+        if (this.wallHp[tile] > 0) {
+          const dmg = Math.min(this.wallHp[tile], 300 + troops * 0.02);
+          this.wallHp[tile] -= dmg;
+          troops -= dmg * 0.02;           // attackers bleed against the wall
+          a.troops = troops;
+          tickBudget -= 0.5;              // walls are slow to breach
+          if (this.wallHp[tile] <= 0) { this.wallHp[tile] = 0; this.numWallTiles = Math.max(0, this.numWallTiles - 1); this.changedTiles.push(tile); a.heap.push(tile, this.tick); a.border.add(tile); }
+          else { a.heap.push(tile, this.tick + 3); a.border.add(tile); }
+          continue;
+        }
         this.attackAddNeighbors(a, tile);
         const res = cfg.attackLogic({
           terrain: this.terrainType(tile),
@@ -558,6 +589,13 @@ class Game {
         troops -= res.attackerTroopLoss;
         a.troops = troops;
         if (target) target.removeTroops(res.defenderTroopLoss);
+        // Conventional troops can hurt a mech they overrun, but it shrugs off most of the damage and bites back.
+        const mech = target ? this.mechAtTile(tile) : null;
+        if (mech && mech.owner === target) {
+          mech.hp -= troops * 0.01 * cfg.mechTroopDamageResist() * 10;
+          troops -= Math.min(troops * 0.3, cfg.mechTroopDamagePerTick(target) * 2);
+          a.troops = troops;
+        }
         this.conquer(attacker, tile);
         if (target) { this.handleDeadDefender(attacker, target); if (!target.alive) break; }
       }
@@ -741,8 +779,10 @@ class Game {
         if (ownerNow === b.owner || (ownerNow && (b.owner.isFriendly(ownerNow) || !this.canAttack(b.owner, ownerNow)))) { b.owner.addTroops(b.troops); continue; }
         if (ownerNow) ownerNow.removeTroops(ownerNow.troops / Math.max(1, ownerNow.numTiles));
         this.conquer(b.owner, dst);
-        b.owner.addTroops(b.troops);
-        this.sendAttack(b.owner, ownerNow, b.troops, dst);
+        // D-Day research: landings hit the beach with +15% troops.
+        const landing = b.owner.researches.has('dday') ? Math.floor(b.troops * 1.15) : b.troops;
+        b.owner.addTroops(landing);
+        this.sendAttack(b.owner, ownerNow, landing, dst);
         if (ownerNow) this.handleDeadDefender(b.owner, ownerNow);
       }
     }
@@ -800,12 +840,27 @@ class Game {
 
   // ---- structures ---------------------------------------------------------------
   unitAt(tile) { return this.unitByTile.get(tile) || null; }
+  populationCount(p) { return p.completedUnitsOf(UnitType.CITY).length; }
+  hasPopulationNear(tile, r) {
+    const x = this.x(tile), y = this.y(tile);
+    for (const u of this.units) {
+      if (u.type !== UnitType.CITY) continue;
+      if (Math.abs(this.x(u.tile) - x) <= r && Math.abs(this.y(u.tile) - y) <= r) return true;
+    }
+    return false;
+  }
   canBuild(p, type, tile) {
     if (!p.alive) return { ok: false, reason: 'dead' };
     if (!Object.values(UnitType).includes(type)) return { ok: false, reason: 'bad type' };
+    if (type === UnitType.WALL || type === UnitType.MECH) return { ok: false, reason: 'wrong build path' };
     if (this.owner[tile] !== p.smallID) return { ok: false, reason: 'You must own the tile' };
     if (type === UnitType.PORT && !this.isOceanShore(tile)) return { ok: false, reason: 'Ports must be built on the sea coast' };
     if (this.settings.disableNukes && (type === UnitType.SILO || type === UnitType.SAM)) return { ok: false, reason: 'Nukes are disabled' };
+    if (type === UnitType.LAB) {
+      if (this.populationCount(p) < this.config.populationRequiredForLab()) return { ok: false, reason: `Research Labs need ${this.config.populationRequiredForLab()} Cities first` };
+      if (this.hasPopulationNear(tile, this.config.labMinGapFromPopulation())) return { ok: false, reason: 'Labs must be away from your Cities' };
+      if (p.researchCount() >= this.config.maxResearchesPerPlayer()) return { ok: false, reason: 'You have used all your researches' };
+    }
     const existing = this.unitAt(tile);
     let upgrade = null;
     if (existing) {
@@ -845,7 +900,255 @@ class Game {
       p.units.push(u);
     }
     this.unitsChanged = true;
+    if (!c.upgrade && type === UnitType.LAB) this.events.push({ k: 'labBuilt', p: p.smallID });
     return c;
+  }
+
+  // ---- walls ---------------------------------------------------------------------
+  // A wall is a drawn line of owned tiles. Enemies must grind each tile's HP down before advancing
+  // and cannot pass tiles behind it; nukes and other projectiles raze walls outright.
+  wallCostFor(p, count) {
+    let total = 0;
+    for (let i = 0; i < count; i++) total += this.config.wallSegmentCost(p.numWallTiles + i, p);
+    return total;
+  }
+  canBuildWall(p, tiles) {
+    if (!p.alive) return { ok: false, reason: 'dead' };
+    if (!Array.isArray(tiles) || tiles.length === 0 || tiles.length > 400) return { ok: false, reason: 'Bad wall' };
+    const seen = new Set();
+    const fresh = [];
+    for (let i = 0; i < tiles.length; i++) {
+      const t = tiles[i];
+      if (!Number.isInteger(t) || t < 0 || t >= this.terrain.length) return { ok: false, reason: 'Bad wall' };
+      if (i > 0) { const a = tiles[i - 1]; const dx = Math.abs(this.x(a) - this.x(t)), dy = Math.abs(this.y(a) - this.y(t)); if (dx + dy !== 1) return { ok: false, reason: 'Wall must be a connected line' }; }
+      if (seen.has(t)) continue;
+      seen.add(t);
+      if (!this.isLand(t)) return { ok: false, reason: 'Walls must be on land' };
+      if (this.owner[t] !== p.smallID) return { ok: false, reason: 'You can only build walls on your own land' };
+      if (this.unitByTile.has(t)) return { ok: false, reason: 'A structure is in the way' };
+      if (this.hasPopulationNear(t, this.config.structureMinGap())) return { ok: false, reason: 'Walls cannot be built right next to a City' };
+      if (this.wallHp[t] === 0) fresh.push(t);
+    }
+    if (!fresh.length) return { ok: false, reason: 'Wall already there' };
+    const cost = this.wallCostFor(p, fresh.length);
+    if (p.gold < cost) return { ok: false, reason: `Not enough gold (need ${Math.floor(cost).toLocaleString()})` };
+    return { ok: true, cost, fresh };
+  }
+  buildWall(p, tiles) {
+    const c = this.canBuildWall(p, tiles);
+    if (!c.ok) return c;
+    p.removeGold(c.cost);
+    const hp = this.config.wallMaxHp();
+    for (const t of c.fresh) { this.wallHp[t] = hp; this.changedTiles.push(t); }
+    p.numWallTiles += c.fresh.length;
+    this.numWallTiles = (this.numWallTiles || 0) + c.fresh.length;
+    return c;
+  }
+  razeWallsAround(cx, cy, r) {
+    for (let y = Math.max(0, cy - r); y <= Math.min(this.height - 1, cy + r); y++) {
+      for (let x = Math.max(0, cx - r); x <= Math.min(this.width - 1, cx + r); x++) {
+        const t = this.ref(x, y);
+        if (this.wallHp[t] && (x - cx) ** 2 + (y - cy) ** 2 <= r * r) {
+          const o = this.ownerOf(t);
+          if (o) o.numWallTiles = Math.max(0, o.numWallTiles - 1);
+          this.wallHp[t] = 0; this.changedTiles.push(t);
+        }
+      }
+    }
+  }
+
+  // ---- mechs ---------------------------------------------------------------------
+  // National-scale walking war machines. Autonomous: they seek the nearest hostile land, crush
+  // troops, tear through walls/defenses, and take only a fraction of normal troop damage.
+  canBuildMech(p, tile) {
+    if (!p.alive) return { ok: false, reason: 'dead' };
+    if (!this.isLand(tile) || this.owner[tile] !== p.smallID) return { ok: false, reason: 'Deploy a Mech on your own land' };
+    const cost = this.config.unitCost(UnitType.MECH, p.mechs.length, p);
+    if (p.gold < cost) return { ok: false, reason: `Not enough gold (need ${Math.floor(cost).toLocaleString()})` };
+    return { ok: true, cost };
+  }
+  buildMech(p, tile) {
+    const c = this.canBuildMech(p, tile);
+    if (!c.ok) return c;
+    p.removeGold(c.cost);
+    const hp = this.config.mechBaseHp(p);
+    const mech = { id: nextId++, owner: p, x: this.x(tile) + 0.5, y: this.y(tile) + 0.5, hp, maxHp: hp, target: -1, retarget: 0, engaged: false, done: false, kills: 0 };
+    p.mechs.push(mech);
+    this.mechs.push(mech);
+    this.events.push({ k: 'mech', by: p.smallID });
+    return c;
+  }
+  // BFS from the mech over land for the nearest tile owned by a hostile player (or neutral if none).
+  findMechTarget(mech, maxDepth = 80) {
+    const p = mech.owner;
+    const start = this.ref(Math.floor(mech.x), Math.floor(mech.y));
+    if (!this.valid(Math.floor(mech.x), Math.floor(mech.y))) return -1;
+    const seen = new Set([start]);
+    let frontier = [start];
+    const b = [0, 0, 0, 0];
+    let neutral = -1;
+    for (let d = 0; d < maxDepth && frontier.length; d++) {
+      const next = [];
+      for (const t of frontier) {
+        const n = this.neighbors4(t, b);
+        for (let k = 0; k < n; k++) {
+          const nb = b[k];
+          if (seen.has(nb)) continue;
+          seen.add(nb);
+          if (!this.isLand(nb)) continue;
+          const o = this.owner[nb];
+          if (o !== 0 && o !== p.smallID) { const q = this.playersBySmall[o]; if (q && q.alive && !p.isFriendly(q)) return nb; }
+          else if (o === 0 && neutral < 0 && !this.fallout[nb]) neutral = nb;
+          next.push(nb);
+        }
+      }
+      frontier = next;
+    }
+    return neutral;
+  }
+  tickMechs() {
+    if (!this.mechs.length) return;
+    const cfg = this.config;
+    for (const m of this.mechs) {
+      if (m.done) continue;
+      const p = m.owner;
+      if (!p.alive) { m.done = true; continue; }
+      if (m.hp <= 0) { m.done = true; this.events.push({ k: 'mechLost', p: p.smallID }); continue; }
+      if (this.tick >= m.retarget || m.target < 0 || (this.owner[m.target] === p.smallID)) {
+        m.target = this.findMechTarget(m);
+        m.retarget = this.tick + 15;
+      }
+      const range = cfg.mechRange(p);
+      if (m.target < 0) { m.engaged = false; continue; }
+      const tx = this.x(m.target) + 0.5, ty = this.y(m.target) + 0.5;
+      const dx = tx - m.x, dy = ty - m.y, dist = Math.hypot(dx, dy);
+      if (dist > range) {
+        const sp = cfg.mechSpeed(p);
+        const nx = m.x + (dx / dist) * sp, ny = m.y + (dy / dist) * sp;
+        const nt = this.ref(Math.floor(nx), Math.floor(ny));
+        // mechs walk on land only (they're not amphibious)
+        if (this.valid(Math.floor(nx), Math.floor(ny)) && this.isLand(nt)) { m.x = nx; m.y = ny; }
+        else { m.retarget = this.tick; m.target = -1; }
+        m.engaged = false;
+        continue;
+      }
+      // Engaged: conquer hostile tiles within range, drain their troops, take chip damage.
+      m.engaged = true;
+      const cx = Math.floor(m.x), cy = Math.floor(m.y);
+      const r = Math.ceil(range);
+      let conquered = 0, budget = cfg.mechConquerBonus(p) * 2;
+      let enemy = null;
+      for (let y = Math.max(0, cy - r); y <= Math.min(this.height - 1, cy + r) && budget > 0; y++) {
+        for (let x = Math.max(0, cx - r); x <= Math.min(this.width - 1, cx + r) && budget > 0; x++) {
+          if ((x - cx) ** 2 + (y - cy) ** 2 > range * range) continue;
+          const t = this.ref(x, y);
+          if (!this.isLand(t)) continue;
+          const o = this.owner[t];
+          if (o === p.smallID) continue;
+          const q = o ? this.playersBySmall[o] : null;
+          if (q && (!q.alive || p.isFriendly(q))) continue;
+          if (q) enemy = q;
+          if (this.wallHp[t] > 0) { this.wallHp[t] = Math.max(0, this.wallHp[t] - 2500 * cfg.mechConquerBonus(p)); if (this.wallHp[t] === 0) { this.changedTiles.push(t); if (q) q.numWallTiles = Math.max(0, q.numWallTiles - 1); } budget -= 1; continue; }
+          this.conquer(p, t);
+          conquered++; budget -= 1;
+          if (q) this.handleDeadDefender(p, q);
+        }
+      }
+      if (enemy) {
+        enemy.removeTroops(cfg.mechTroopDamagePerTick(p));
+        // Chip damage from the defender's troop density, heavily resisted.
+        const density = enemy.troops / Math.max(1, enemy.numTiles);
+        m.hp -= (density * 4 + (this.hasDefensePostNearby(enemy, m.target) ? 400 : 0)) * cfg.mechTroopDamageResist();
+      }
+      void conquered;
+    }
+    if (this.mechs.some((m) => m.done)) {
+      this.mechs = this.mechs.filter((m) => !m.done);
+      for (const p of this.players) p.mechs = p.mechs.filter((m) => !m.done);
+    }
+  }
+  // Enemy attacks that roll over a mech's tile damage it (mechs shrug most of it off).
+  mechAtTile(tile) {
+    const x = this.x(tile), y = this.y(tile);
+    for (const m of this.mechs) if (!m.done && Math.floor(m.x) === x && Math.floor(m.y) === y) return m;
+    return null;
+  }
+
+  // ---- research (labs) -----------------------------------------------------------
+  labReady(p) {
+    return p.completedUnitsOf(UnitType.LAB).find((u) => u.cooldown === 0) || null;
+  }
+  offerResearch(p, lab) {
+    if (p.research || p.pendingChoices || p.researchCount() >= this.config.maxResearchesPerPlayer()) return false;
+    const taken = p.researches;
+    const pool = RESEARCH.filter((r) => !taken.has(r.id));
+    if (pool.length < 3) return false;
+    const choices = [];
+    const bag = [...pool];
+    while (choices.length < 3 && bag.length) { const i = this.rng.int(0, bag.length - 1); choices.push(bag[i].id); bag.splice(i, 1); }
+    p.pendingChoices = { labId: lab.id, choices };
+    if (p.type === PlayerType.HUMAN) this.events.push({ k: 'researchOffer', to: p.id, choices });
+    else if (p.ai && p.ai.pickResearch) this.pickResearch(p, p.ai.pickResearch(choices));
+    return true;
+  }
+  pickResearch(p, id) {
+    if (!p.pendingChoices || !p.pendingChoices.choices.includes(id)) return { ok: false, reason: 'Not an offered research' };
+    const lab = this.units.find((u) => u.id === p.pendingChoices.labId);
+    p.research = { id, doneTick: this.tick + this.config.labResearchTicks(), labId: p.pendingChoices.labId };
+    p.pendingChoices = null;
+    if (lab) { lab.cooldown = this.config.labResearchTicks() + this.config.labCooldownTicks(); this.unitsChanged = true; }
+    this.events.push({ k: 'researchStart', p: p.smallID, id });
+    return { ok: true };
+  }
+  tickResearch() {
+    for (const p of this.players) {
+      if (!p.alive) continue;
+      if (p.research && this.tick >= p.research.doneTick) {
+        p.researches.add(p.research.id);
+        this.events.push({ k: 'researchDone', p: p.smallID, id: p.research.id });
+        p.research = null;
+        this.unitsChanged = true;
+      }
+      // A ready lab with a free research slot offers a fresh 3-way choice.
+      if (!p.research && !p.pendingChoices && p.researchCount() < this.config.maxResearchesPerPlayer() && this.tick % 10 === 0) {
+        const lab = this.labReady(p);
+        if (lab) this.offerResearch(p, lab);
+      }
+    }
+  }
+  // Defensive Position research: defense posts fight back on their own.
+  tickDefensivePosition() {
+    if (this.tick % 10 !== 0) return;
+    const r = this.config.defensePostRange();
+    for (const p of this.players) {
+      if (!p.alive || !p.researches.has('defensive_position') || !p.incomingAttacks.length) continue;
+      const posts = p.completedUnitsOf(UnitType.DEFENSE_POST);
+      if (!posts.length) continue;
+      const hit = p.troops * 0.15 * 0.1; // 15% of troops as firepower, spread over ~10s
+      for (const a of p.incomingAttacks) {
+        if (a.done) continue;
+        let inRange = false, n = 0;
+        for (const t of a.border) { if (n++ > 40) break; if (posts.some((u) => this.dist(u.tile, t) <= r)) { inRange = true; break; } }
+        if (inRange) a.troops = Math.max(0, a.troops - hit);
+      }
+    }
+  }
+  // Arbitrary "how dangerous / how rich" numbers for the nation info panel.
+  attackPower(p) {
+    let v = p.troops; // troops committed to attacks are already removed from p.troops (they're "away")
+    v += p.mechs.filter((m) => !m.engaged).length * 600000; // idle mechs at home
+    v += p.mechs.filter((m) => m.engaged).length * 200000;   // engaged mechs count less (they're fighting elsewhere)
+    v += p.completedUnitsOf(UnitType.SILO).length * 250000;
+    v += p.completedUnitsOf(UnitType.DEFENSE_POST).length * 40000;
+    for (const id of p.researches) if (RESEARCH_BY_ID[id] && RESEARCH_BY_ID[id].tags.some((t) => t === 'mech' || t === 'aggro' || t === 'defense')) v *= 1.08;
+    return Math.floor(v);
+  }
+  economyPower(p) {
+    let v = p.goldRate * TICKS_PER_SECOND;                           // base gold/s
+    v += p.unitLevels(UnitType.PORT) * 800;                           // trade estimate per port level
+    v += p.numTiles * 0.02;
+    if (p.researches.has('mass_production')) v *= 1.15;
+    return Math.floor(v);
   }
 
   // ---- nukes ------------------------------------------------------------------
@@ -928,6 +1231,13 @@ class Game {
       p.updateRelation(nk.owner, -100);
       if (p !== nk.owner && p.allies.has(nk.owner.id) && count >= 100) this.breakAlliance(nk.owner, p);
     }
+    // Projectiles raze walls outright and wreck mechs caught in the blast.
+    this.razeWallsAround(cx, cy, outer);
+    for (const m of this.mechs) {
+      if (m.done) continue;
+      const d = Math.hypot(m.x - cx, m.y - cy);
+      if (d <= inner) m.hp = 0; else if (d <= outer) m.hp -= m.maxHp * (1 - (d - inner) / (outer - inner)) * 0.8;
+    }
     this.events.push({ k: 'boom', type: nk.type, x: cx, y: cy, by: nk.owner.smallID });
   }
 
@@ -991,9 +1301,12 @@ class Game {
       terrain: Buffer.from(this.terrain.buffer, this.terrain.byteOffset, this.terrain.byteLength).toString('base64'),
       owner: Buffer.from(this.owner.buffer, this.owner.byteOffset, this.owner.byteLength).toString('base64'),
       fallout: Buffer.from(this.fallout.buffer, this.fallout.byteOffset, this.fallout.byteLength).toString('base64'),
+      walls: Buffer.from(this.wallHp.buffer, this.wallHp.byteOffset, this.wallHp.byteLength).toString('base64'),
       players: this.players.map((p) => this.playerInfo(p)),
       stats: this.statsPacket(),
       units: this.unitsPacket(),
+      mechs: this.mechsPacket(),
+      research: RESEARCH,
       settings: this.settings,
       winner: this.winner ? this.winner.smallID : 0,
     };
@@ -1005,8 +1318,12 @@ class Game {
       (p.spawned ? 1 : 0) | (p.alive ? 2 : 0) | (p.isTraitor() ? 4 : 0) | (p.disconnected ? 8 : 0),
       Math.floor(cfg.maxTroops(p)), [...p.allies].map((id) => this.player(id)?.smallID || 0),
       Math.floor(p.alive ? cfg.troopIncreaseRate(p) * TICKS_PER_SECOND : 0),
+      // 8: research state, 9: attack power, 10: economy power, 11: wall tiles, 12: mech count
+      [[...p.researches], p.research ? [p.research.id, Math.max(0, p.research.doneTick - this.tick)] : null, p.type === PlayerType.HUMAN && p.pendingChoices ? p.pendingChoices.choices : null],
+      this.attackPower(p), this.economyPower(p), p.numWallTiles, p.mechs.length,
     ]);
   }
+  mechsPacket() { return this.mechs.filter((m) => !m.done).map((m) => [m.id, m.owner.smallID, Math.round(m.x * 10) / 10, Math.round(m.y * 10) / 10, Math.round(m.hp), Math.round(m.maxHp), m.engaged ? 1 : 0]); }
   unitsPacket() { return this.units.map((u) => [u.id, u.type, u.owner.smallID, u.tile, u.level, u.constructionLeft, u.cooldown]); }
   attacksPacket() { return this.attacks.filter((a) => !a.done).map((a) => [a.id, a.attacker.smallID, a.target ? a.target.smallID : 0, Math.floor(a.troops), a.sourceTile ?? -1]); }
   boatsPacket() { return this.boats.filter((b) => !b.done).map((b) => [b.id, b.owner.smallID, b.x, b.y, Math.floor(b.troops), b.target ? b.target.smallID : 0]); }
@@ -1019,7 +1336,7 @@ class Game {
       for (const t of this.changedTiles) {
         if (seen.has(t)) continue;
         seen.add(t);
-        tiles.push(t, this.owner[t] | (this.fallout[t] ? 0x8000 : 0));
+        tiles.push(t, this.owner[t] | (this.fallout[t] ? 0x8000 : 0) | (this.wallHp[t] ? 0x4000 : 0));
       }
       this.changedTiles.length = 0;
     }
@@ -1029,6 +1346,7 @@ class Game {
     if (this.boats.length || this.nukes.length || this.tradeShips.length) { pkt.boats = this.boatsPacket(); pkt.nukes = this.nukesPacket(); pkt.trade = this.tradePacket(); }
     else if (this.tick % 5 === 0) { pkt.boats = []; pkt.nukes = []; pkt.trade = []; }
     if (this.unitsChanged || this.tick % 50 === 0) { pkt.units = this.unitsPacket(); this.unitsChanged = false; }
+    if (this.mechs.length || this.tick % 20 === 0) pkt.mechs = this.mechsPacket();
     if (this.phase === 'spawn') pkt.spawnLeft = this.spawnTicks - this.tick;
     if (this.phase === 'over') pkt.winner = this.winner ? this.winner.smallID : 0;
     const reqs = [];

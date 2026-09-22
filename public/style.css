@@ -156,3 +156,33 @@ a { color: #8ab4f8; }
 .overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.45); z-index: 50; }
 .overlay .panel { min-width: 320px; text-align: center; }
 #spectate-banner { position: absolute; bottom: 150px; left: 50%; transform: translateX(-50%); background: rgba(229,57,53,0.85); padding: 6px 14px; border-radius: 6px; font-weight: 600; }
+
+/* ---- power stats on the nation card ---- */
+.pc-power { display: flex; gap: 8px; margin-top: 8px; }
+.pw { flex: 1; border-radius: 8px; padding: 6px 10px; display: flex; flex-direction: column; gap: 1px; }
+.pw.atk { background: linear-gradient(135deg, rgba(229,57,53,0.35), rgba(229,57,53,0.12)); border: 1px solid rgba(229,57,53,0.6); }
+.pw.eco { background: linear-gradient(135deg, rgba(245,197,66,0.35), rgba(245,197,66,0.12)); border: 1px solid rgba(245,197,66,0.6); }
+.pw-l { font-size: 10px; letter-spacing: 1px; color: #cfd6de; font-weight: 600; }
+.pw-v { font-size: 20px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.pc-research { margin-top: 6px; font-size: 12px; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.rs { background: var(--panel2); border-radius: 4px; padding: 2px 7px; }
+.rs.done { border: 1px solid #3b82f6; }
+.rs.prog { border: 1px dashed #9ad0ff; color: #9ad0ff; }
+
+/* ---- research picker (TFT augment style) ---- */
+#research-picker { z-index: 60; background: rgba(0,0,0,0.6); }
+.rp-inner { background: var(--panel-solid); border: 1px solid var(--border); border-radius: 14px; padding: 22px 26px; max-width: 900px; width: 92vw; text-align: center; }
+.rp-head h2 { margin-bottom: 2px; letter-spacing: 1px; }
+.rp-cards { display: flex; gap: 16px; margin: 18px 0 12px; justify-content: center; flex-wrap: wrap; }
+.rcard { flex: 1 1 240px; max-width: 280px; background: #12161b; border: 2px solid var(--border); border-radius: 12px; padding: 16px 14px 14px; display: flex; flex-direction: column; gap: 8px; cursor: pointer; transition: transform 0.12s, border-color 0.12s, box-shadow 0.12s; text-align: left; }
+.rcard:hover { transform: translateY(-4px) scale(1.02); border-color: #fff; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+.rcard-tag { font-size: 10px; letter-spacing: 1.5px; color: var(--muted); font-weight: 700; }
+.rcard-name { font-size: 18px; font-weight: 800; }
+.rcard-desc { font-size: 13px; color: #cfd6de; line-height: 1.4; flex: 1; }
+.rcard button { width: 100%; margin-top: 4px; }
+.rcard.tag-mech { border-color: #9333ea; } .rcard.tag-mech .rcard-tag { color: #c084fc; }
+.rcard.tag-econ { border-color: #eab308; } .rcard.tag-econ .rcard-tag { color: #fcd34d; }
+.rcard.tag-defense { border-color: #3b82f6; } .rcard.tag-defense .rcard-tag { color: #93c5fd; }
+.rcard.tag-navy { border-color: #06b6d4; } .rcard.tag-navy .rcard-tag { color: #67e8f9; }
+.rcard.tag-aggro { border-color: #e53935; } .rcard.tag-aggro .rcard-tag { color: #fca5a5; }
+.rcard.tag-air { border-color: #94a3b8; } .rcard.tag-air .rcard-tag { color: #cbd5e1; }
