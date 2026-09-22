@@ -4,7 +4,10 @@
 
 const TerrainType = { WATER: 0, PLAINS: 1, HIGHLAND: 2, MOUNTAIN: 3 };
 const PlayerType = { HUMAN: 'human', NATION: 'nation', BOT: 'bot' };
-const UnitType = { CITY: 'city', PORT: 'port', DEFENSE_POST: 'defense', SILO: 'silo', SAM: 'sam', LAB: 'lab', WALL: 'wall', MECH: 'mech' };
+const UnitType = { CITY: 'city', PORT: 'port', DEFENSE_POST: 'defense', SILO: 'silo', SAM: 'sam', LAB: 'lab', FACTORY: 'factory', WALL: 'wall', MECH: 'mech', WARSHIP: 'warship', SUBMARINE: 'submarine', MINE: 'mine' };
+// Fixed structures (live on a tile). Mobile units (mech/warship/submarine) are handled by their own systems.
+const STRUCTURE_TYPES = ['city', 'port', 'defense', 'silo', 'sam', 'lab', 'factory', 'mine'];
+const { effects: R } = require('./research');
 // Structures that count as "population" (a nation's civilian centers). Labs & walls can't be built near these.
 const POPULATION_TYPES = ['city'];
 const NukeType = { ATOM: 'atom', HYDROGEN: 'hydrogen' };
@@ -27,7 +30,7 @@ const DEFAULT_SETTINGS = {
   nations: 30, // AI nations (uses the map's real nations first)
   bots: 150, // small tribes
   difficulty: Difficulty.MEDIUM,
-  spawnPhaseSeconds: 30,
+  spawnPhaseSeconds: 10,
   gameSpeed: 1,
   disableNukes: false,
   disableBoats: false,
@@ -109,15 +112,44 @@ class Config {
   defensePostRange() { return 30; }
   defensePostDefenseBonus() { return 5; }
   defensePostSpeedBonus() { return 3; }
-  samRange() { return 70; }
+  samRange(player) { return 70 + R.samRangeBonus(player); }
   samCooldownTicks() { return 90; }
-  siloCooldownTicks() { return 90; }
-  cityTroopIncrease() { return 250000; }
-  boatMaxNumber() { return this.settings.disableBoats ? 0 : 3; }
-  boatSpeed() { return 2; } // tiles per tick
-  tradeShipSpeed() { return 1; }
-  nukeSpeed() { return 4; }
-  nukeMagnitude(type) { return type === NukeType.HYDROGEN ? { inner: 80, outer: 100 } : { inner: 12, outer: 30 }; }
+  siloCooldownTicks(player) { return Math.floor(90 * R.siloCooldownMultiplier(player)); }
+  cityTroopIncrease(player) { return R.cityTroopBonus(player); }
+  boatMaxNumber(player) { return this.settings.disableBoats ? 0 : R.boatMax(player); }
+  boatSpeed(player) { return 2 * R.boatSpeed(player); } // tiles per tick along the path
+  tradeShipSpeed() { return 1.2; }
+  trainSpeed() { return 2.5; }
+  nukeSpeed() { return 6; } // tiles per tick along the arc
+  nukeMagnitude(type, player) { return type === NukeType.HYDROGEN ? { inner: 80, outer: 100 } : R.atomMagnitude(player); }
+  // ---- warships / navy (OpenFront numbers) ----
+  warshipHp() { return 1000; }
+  warshipPatrolRange() { return 100; }
+  warshipTargetRange() { return 130; }
+  warshipShellRate() { return 20; }
+  warshipSpeed() { return 1.2; }
+  shellSpeed() { return 3; }
+  shellDamage(rng) { return Math.floor(250 * ((rng.int(1, 6) - 1) * 25 + 200) / 100); }
+  bombardRange() { return 40; }
+  submarineHp() { return 800; }
+  submarineDetectRange() { return 10; }
+  submarineVolleyCooldown() { return 90 * TICKS_PER_SECOND; }
+  submarineMissileRange() { return 80; }
+  mineRange() { return 2; }
+  defensePostShipRange(player) { return R.defensePostShipRange(player); }
+  defensePostShellRate(player) { return R.defensePostShellRate(player); }
+  // ---- rails / factories (OpenFront numbers) ----
+  trainStationMinRange() { return 15; }
+  trainStationMaxRange() { return 110; }
+  railroadMaxSize() { return Math.floor(110 * 1.4142); }
+  trainSpawnRate(numFactories) { return (numFactories + 10) * 15; } // expected ticks between trains per factory level
+  trainGold(rel, stopsVisited) {
+    const base = rel === 'ally' ? 35000 : rel === 'self' ? 10000 : 25000;
+    return Math.max(5000, base - Math.max(0, stopsVisited - 9) * 5000);
+  }
+  bomberCost() { return 300000; }
+  bomberRange() { return 250; }
+  bomberSpeed() { return 4; }
   traitorDurationTicks() { return 30 * TICKS_PER_SECOND; }
   traitorDefenseDebuff() { return 1.5; }
   traitorSpeedDebuff() { return 0.75; }
@@ -137,58 +169,61 @@ class Config {
       default: return 0;
     }
   }
-  // Mass Production research: all buildings cost 15% less.
-  buildDiscount(player) { return player && player.researches && player.researches.has('mass_production') ? 0.85 : 1; }
+  buildDiscount(player) { return R.buildDiscount(player); }
+  // numOwned: count of the type owned (ports and factories share a count, as in OpenFront).
   unitCost(type, numOwned, player) {
     if (player && player.type === PlayerType.HUMAN && this.infiniteGold()) return 0;
     const d = this.buildDiscount(player);
     switch (type) {
       case UnitType.CITY: return Math.min(1000000, Math.pow(2, numOwned) * 125000) * d;
-      case UnitType.PORT: return Math.min(1000000, Math.pow(2, numOwned) * 125000) * d;
+      case UnitType.PORT:
+      case UnitType.FACTORY: return Math.min(1000000, Math.pow(2, numOwned) * 125000) * d;
       case UnitType.DEFENSE_POST: return Math.min(250000, (numOwned + 1) * 50000) * d;
       case UnitType.SILO: return 1000000 * d;
       case UnitType.SAM: return Math.min(3000000, (numOwned + 1) * 1500000) * d;
       case UnitType.LAB: return 1000000 * d;
+      case UnitType.MINE: return 50000 * d;
+      case UnitType.WARSHIP: {
+        let c = Math.min(1000000, (numOwned + 1) * 250000);
+        if (player && player.researches && player.researches.has('coastal_bombardment')) c += 300000 * Math.floor(numOwned / 10);
+        return c * d;
+      }
+      case UnitType.SUBMARINE: return Math.min(2500000, (numOwned + 1) * 625000) * d;
       // Mechs are national-scale assets: brutally expensive, escalating hard per mech owned.
-      case UnitType.MECH: return (2000000 + numOwned * 2500000) * (player && player.researches && player.researches.has('mech_production') ? 0.6 : 1) * d;
+      case UnitType.MECH: return (2000000 + numOwned * 2500000) * R.mechCostMultiplier(player) * d;
       default: return 0;
     }
   }
-  // Wall segments: near-exponential in the number of wall tiles already built.
-  wallSegmentCost(numWallTiles, player) {
+  // Wall tiles (walls are 3 tiles thick): near-exponential in the number of wall tiles already owned.
+  wallTileCost(numWallTiles, player) {
     if (player && player.type === PlayerType.HUMAN && this.infiniteGold()) return 0;
-    return Math.floor((2000 + 400 * numWallTiles) * Math.pow(1.012, numWallTiles) * this.buildDiscount(player));
+    return Math.floor((700 + 120 * numWallTiles) * Math.pow(1.006, numWallTiles) * this.buildDiscount(player));
   }
   wallMaxHp() { return 60000; }
-  labResearchTicks() { return 60 * TICKS_PER_SECOND; } // 60s to complete a research
+  wallBuildTicks() { return 120; }        // per 3x3 block, built one block at a time (slowest build in the game)
+  wallThickness() { return 3; }
+  labResearchTicks() { return 60 * TICKS_PER_SECOND; }
   labCooldownTicks() { return 45 * TICKS_PER_SECOND; }
   maxResearchesPerPlayer() { return 2; }
   populationRequiredForLab() { return 3; }
-  structureMinGap() { return 3; }        // labs/walls can't be within this many tiles of a population building
+  structureMinGap() { return 3; }
   labMinGapFromPopulation() { return 6; }
 
-  // ---- Mechs (every nation has them from the start) ----
-  mechBaseHp(player) {
-    let hp = 8000;
-    if (player && player.researches) { if (player.researches.has('heavy_mech')) hp *= 2.2; }
-    return hp;
-  }
-  mechSpeed(player) {
-    let s = 0.6; // tiles/tick
-    if (player && player.researches) { if (player.researches.has('heavy_mech')) s *= 0.6; }
-    return s;
-  }
-  mechRange(player) { return player && player.researches && player.researches.has('longrange_mech') ? 14 : 3; }
-  mechTroopDamagePerTick(player) {
-    let d = 1200; // damage dealt to enemy troops per tick while engaged
-    if (player && player.researches && player.researches.has('mech_weapons')) d *= 1.6;
-    return d;
-  }
-  mechTroopDamageResist() { return 0.15; } // mechs take only 15% of the troop loss a normal tile would inflict
-  mechConquerBonus(player) { return player && player.researches && player.researches.has('assault_mech') ? 3 : 1; } // vs defended land
+  // ---- Mechs: super-tanky walking artillery, built at level-2+ factories ----
+  mechFactoryLevelRequired() { return 2; }
+  mechBaseHp(player, factoryLevel = 2) { return Math.floor(40000 * (1 + 0.5 * (factoryLevel - 2)) * R.mechHpMultiplier(player)); }
+  mechSpeed(player, onWater = false) { return 0.35 * (onWater ? 0.6 : 1) * R.mechSpeedMultiplier(player); }
+  mechRange(player, factoryLevel = 2) { return 12 + 3 * (factoryLevel - 2) + R.mechRangeBonus(player); }
+  mechCannonCooldown(player) { return Math.floor(60 * R.mechCooldownMultiplier(player)); }
+  mechStompCooldown(player) { return Math.floor(20 * R.mechCooldownMultiplier(player)); }
+  mechShellDamage(player, factoryLevel = 2) { return Math.floor(2500 * (1 + 0.3 * (factoryLevel - 2)) * R.mechDamageMultiplier(player)); }
+  mechShellBlastRadius() { return 2.5; }
+  mechStompRadius(player) { return 3 + R.mechStompBonus(player); }
+  mechTroopKillPerShell(player, factoryLevel = 2) { return Math.floor(6000 * (1 + 0.3 * (factoryLevel - 2)) * R.mechDamageMultiplier(player)); }
+  mechPatrolRadius() { return 6; }
   nukeCost(type, player) {
     if (player && player.type === PlayerType.HUMAN && this.infiniteGold()) return 0;
-    return type === NukeType.HYDROGEN ? 5000000 : 750000;
+    return type === NukeType.HYDROGEN ? 5000000 : R.atomCost(player);
   }
 
   startTroops(type) {
@@ -205,7 +240,7 @@ class Config {
   }
   maxTroops(player) {
     if (player.type === PlayerType.HUMAN && this.infiniteTroops()) return 1e9;
-    const max = 2 * (Math.pow(player.numTiles, 0.6) * 1000 + 50000) + player.cityLevels() * this.cityTroopIncrease();
+    const max = (2 * (Math.pow(player.numTiles, 0.6) * 1000 + 50000) + player.cityLevels() * this.cityTroopIncrease(player)) * R.maxTroopsMultiplier(player);
     if (player.type === PlayerType.BOT) return max / 3;
     if (player.type === PlayerType.HUMAN) return max;
     switch (this.difficulty()) {
@@ -227,10 +262,11 @@ class Config {
         case Difficulty.IMPOSSIBLE: toAdd *= 1.05; break;
       }
     }
+    toAdd *= R.troopGrowthMultiplier(player, player.connectedFactories || 0);
     return Math.min(player.troops + toAdd, max) - player.troops;
   }
-  goldAdditionRate(player) {
-    return player.type === PlayerType.BOT ? 50 : 100;
+  goldAdditionRate(player, attacking = false) {
+    return (player.type === PlayerType.BOT ? 50 : 100) * R.goldMultiplier(player, attacking);
   }
   // Gold each side earns when a trade ship arrives, by sailing distance.
   tradeShipGold(dist) {
@@ -273,12 +309,17 @@ class Config {
     const speedCost = (within(troopRatio, 0.82, 7.5) * within(troopRatio / 20, 1, 50)) / SPEED_COST_DIVISOR;
     const largeAttackerSpeedBonus = largeTerritoryBonus(attacker.numTiles, LARGE_ATTACKER_SPEED_DEPTH);
     return {
-      attackerTroopLoss,
+      attackerTroopLoss: attackerTroopLoss * (input.attackerLossMult || 1),
       defenderTroopLoss,
-      tickFraction: (speedCost * tileCost * largeAttackerSpeedBonus * largeDefenderBonus * traitorCostMod) / Math.max(1, input.borderSize),
+      tickFraction: (speedCost * tileCost * largeAttackerSpeedBonus * largeDefenderBonus * traitorCostMod) / Math.max(1, input.borderSize) / (input.attackSpeedMult || 1),
     };
   }
-  conquerGoldAmount(captured) { return Math.floor(captured.gold * 0.5) + 10000; }
+  // OpenFront: conquering an AI takes its whole treasury, a human half of it. We add a land bounty
+  // so swallowing a big nation pays a good chunk.
+  conquerGoldAmount(captured) {
+    const treasury = captured.type === PlayerType.HUMAN ? Math.floor(captured.gold * 0.5) : Math.floor(captured.gold);
+    return treasury + 10000 + captured.numTiles * 15;
+  }
   nationAttackRate(rng) {
     switch (this.difficulty()) {
       case Difficulty.EASY: return rng.int(65, 100);
@@ -289,38 +330,9 @@ class Config {
   }
 }
 
-// Research augments. `impl:true` = fully wired into the sim this build; others are staged (pickable, effect noted).
-// `weight` biases the random 3-of pool. `tags` help the AI pick sensibly for its strategy.
-const RESEARCH = [
-  { id: 'war_economy', name: 'War Economy', impl: true, tags: ['econ', 'aggro'],
-    desc: '+30% gold income while you are attacking an enemy nation.' },
-  { id: 'mass_production', name: 'Mass Production', impl: true, tags: ['econ', 'build'],
-    desc: 'All buildings cost 15% less gold.' },
-  { id: 'defensive_position', name: 'Defensive Position', impl: true, tags: ['defense'],
-    desc: 'Defense Posts fight back on their own, hurting nearby attackers by 15% of your troops. Click one to reinforce.' },
-  { id: 'heavy_mech', name: 'Heavy Mech Doctrine', impl: true, tags: ['mech', 'defense'],
-    desc: 'Your Mechs are slower but far more durable (2.2× HP).' },
-  { id: 'assault_mech', name: 'Assault Mech Doctrine', impl: true, tags: ['mech', 'aggro'],
-    desc: 'Your Mechs tear through defended and walled territory 3× faster.' },
-  { id: 'mech_production', name: 'Mech Production', impl: true, tags: ['mech', 'econ'],
-    desc: 'Mechs cost 40% less, so you can field more of them.' },
-  { id: 'mech_weapons', name: 'Mech Weapons Systems', impl: true, tags: ['mech', 'aggro'],
-    desc: 'Mechs deal 60% more damage to enemy troops.' },
-  { id: 'longrange_mech', name: 'Long-Range Mech Systems', impl: true, tags: ['mech'],
-    desc: 'Mechs gain a long strike range and can hit land from farther away.' },
-  { id: 'dday', name: 'D-Day', impl: true, tags: ['navy', 'aggro'],
-    desc: 'Boat invasions land with +15% troops, and can carry more.' },
-  { id: 'coastal_bombardment', name: 'Coastal Bombardment', impl: false, tags: ['navy', 'aggro'],
-    desc: 'Warships stay at sea and bombard coastal enemy land within range; only enemy warships can stop them. (Staged — needs warship art)' },
-  // Staged (pickable; deep implementation on the roadmap — need art/VFX):
-  { id: 'submarine_warfare', name: 'Submarine Warfare', impl: false, tags: ['navy'],
-    desc: 'Unlock invisible Submarines that fire volleys of short-range missiles and slip past SAMs. (Staged)' },
-  { id: 'strategic_bombers', name: 'Strategic Bombers', impl: false, tags: ['air', 'aggro'],
-    desc: 'An air force that bombs enemy Cities, Factories and Silos at range. (Staged)' },
-];
-const RESEARCH_BY_ID = Object.fromEntries(RESEARCH.map((r) => [r.id, r]));
+const { RESEARCH, RESEARCH_BY_ID } = require('./research');
 
 module.exports = {
-  TerrainType, PlayerType, UnitType, POPULATION_TYPES, NukeType, Difficulty, TICKS_PER_SECOND, DEFAULT_SETTINGS, sanitizeSettings,
+  TerrainType, PlayerType, UnitType, STRUCTURE_TYPES, POPULATION_TYPES, NukeType, Difficulty, TICKS_PER_SECOND, DEFAULT_SETTINGS, sanitizeSettings,
   Config, within, HUMAN_COLORS, NATION_COLORS, BOT_COLORS, RESEARCH, RESEARCH_BY_ID,
 };

@@ -135,6 +135,8 @@ a { color: #8ab4f8; }
 #hotbar-tip { bottom: 128px; left: 50%; transform: translateX(-50%); font-size: 12.5px; text-align: center; pointer-events: none; }
 #hotbar-tip b { display: block; font-size: 13px; }
 #hotbar-tip .cost { color: var(--gold); }
+#hotbar-tip .bad { color: #ff9e93; }
+#hotbar-tip { max-width: 420px; }
 
 /* radial menu */
 #radial { position: absolute; width: 0; height: 0; z-index: 30; }
@@ -186,3 +188,5 @@ a { color: #8ab4f8; }
 .rcard.tag-navy { border-color: #06b6d4; } .rcard.tag-navy .rcard-tag { color: #67e8f9; }
 .rcard.tag-aggro { border-color: #e53935; } .rcard.tag-aggro .rcard-tag { color: #fca5a5; }
 .rcard.tag-air { border-color: #94a3b8; } .rcard.tag-air .rcard-tag { color: #cbd5e1; }
+.rcard.tag-nuke { border-color: #f97316; } .rcard.tag-nuke .rcard-tag { color: #fdba74; }
+.rcard.tag-misc { border-color: #64748b; }

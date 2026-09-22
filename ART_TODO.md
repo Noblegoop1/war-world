@@ -19,7 +19,8 @@ colour** in pure grey **RGB 180,180,180**, the **darker border colour** in **RGB
 | Mech HP bar style | — | Currently a plain green→yellow→red bar above the unit. If you want a custom frame, send a 32×6 PNG frame. |
 | Heavy Mech Doctrine skin | `public/assets/sprites/mech_heavy.png` | Bulkier silhouette for nations with the Heavy Mech research. Optional. |
 | Assault Mech Doctrine skin | `public/assets/sprites/mech_assault.png` | Optional. |
-| **VFX:** mech footstep dust, mech cannon muzzle flash, mech explosion | `public/assets/sprites/mech_*.png` sprite sheets (horizontal frames) | Not wired yet — I'll add an animation player once assets exist. |
+| Mech shell (in flight) | `public/assets/sprites/mech_shell.png` | 4–6 px. Currently an orange dot. |
+| **VFX:** mech footstep dust, cannon muzzle flash, shell impact, **stomp shockwave ring**, mech explosion | `public/assets/sprites/mech_*.png` sprite sheets (horizontal frames) | Stomp/impact currently draw a plain expanding ring. Not wired yet — I'll add an animation player once assets exist. |
 | **SFX:** mech deploy, mech footsteps loop, mech fire, mech destroyed | `public/assets/sfx/mech_*.ogg` | No audio system yet; I'll add one when the first files land. |
 | Hotbar / radial icon for "Mech" | `public/assets/icons/MechIcon.svg` | White silhouette, 24×24. Replaces the crosshair. |
 
@@ -39,17 +40,22 @@ colour** in pure grey **RGB 180,180,180**, the **darker border colour** in **RGB
 | Asset | Path | Notes |
 | --- | --- | --- |
 | Lab structure glyph | `public/assets/icons/LabIcon.svg` | White silhouette inside the hexagon shape. Replaces the "i". |
-| Research card art (1 per doctrine, 12 total) | `public/assets/research/<id>.png` | 240×120 landscape banners for the TFT-style cards. IDs: `war_economy`, `mass_production`, `defensive_position`, `heavy_mech`, `assault_mech`, `mech_production`, `mech_weapons`, `longrange_mech`, `dday`, `coastal_bombardment`, `submarine_warfare`, `strategic_bombers`. |
+| Research card art (1 per doctrine, 30 total) | `public/assets/research/<id>.png` | 240×120 landscape banners for the TFT-style cards. IDs: `war_economy`, `mass_production`, `industrial_mobilization`, `military_rail`, `strategic_logistics`, `military_industrial`, `defensive_position`, `coastal_defense`, `hardened_infra`, `military_district`, `fighter_networks`, `heavy_mech`, `assault_mech`, `mech_production`, `mech_weapons`, `longrange_mech`, `rapidfire_mech`, `amphibious_mech`, `coastal_bombardment`, `submarine_warfare`, `nuclear_subs`, `amphibious_warfare`, `naval_mines`, `naval_base`, `dday`, `strategic_bombers`, `close_air_support`, `tactical_nukes`, `mirv`, `nuclear_deterrence`. Doctrines don't change unit art — only the cards. |
 | Research-complete flourish | sprite sheet / CSS-able PNG | Plays over the lab when a research finishes. |
 | **SFX:** picker open, card hover, card pick, research complete | `public/assets/sfx/research_*.ogg` | |
 
-## Priority 4 — Staged units (need art before I wire the deep mechanics)
+## Priority 4 — Navy, air, rail (all live; currently placeholders)
 
 | Asset | Path | Notes |
 | --- | --- | --- |
-| Warship (for Coastal Bombardment) | `public/assets/sprites/warship.png` exists (OpenFront, 11 px). Custom optional. | Bombardment shell + coastal explosion VFX needed. |
-| Submarine | `public/assets/sprites/submarine.png` | ~9 px, mostly hidden — needs a "periscope wake" faint variant for the owner's own view. Missile volley sprite + underwater launch VFX. Cooldown bar frame. |
-| Strategic bomber / air units | `public/assets/sprites/bomber.png`, `fighter.png` | Only if we go for the air-power researches. |
+| Warship | `public/assets/sprites/warship.png` exists (OpenFront, 11 px). Custom optional. | Shells are white dots; Coastal Bombardment shells orange. Impact VFX wanted. |
+| Submarine | `public/assets/sprites/submarine.png` | ~9 px. Currently a dark ellipse with the owner's outline + cyan volley bar. Wants a faint "periscope wake" variant for the owner's own view and a missile sprite (cyan dot now). |
+| Naval mine | `public/assets/sprites/mine.png` | 5–7 px, dark sphere. Currently a small black circle. Mine explosion VFX. |
+| Bomber | `public/assets/sprites/bomber.png` | 10–14 px top-down, colour-swap greys. Currently an owner-coloured arrowhead. Bomb-drop + shot-down VFX. |
+| Trains | `public/assets/sprites/trainEngine.png`, `trainCarriage.png`, `trainCarriageLoaded.png` exist (OpenFront). Custom optional. | Rails are drawn as brown lines with sleepers at high zoom — a rail tile texture (`public/assets/tiles/rail.png`, 8×8) would replace that. |
+| Factory glyph | `public/assets/icons/FactoryIconWhite.svg` exists (OpenFront). Custom optional. | Level badge is a white number in a black circle. |
+| Attack front marker | `public/assets/icons/SwordIconWhite.svg` exists (OpenFront). Custom optional. | Crossed swords + troop count that follows each attack's front. |
+| Nuke arc | — | Dashed red Bézier + target ring; a proper contrail sprite sheet would look better. |
 
 ## UI polish (nice-to-have)
 

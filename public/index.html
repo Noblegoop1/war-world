@@ -29,15 +29,18 @@
     <div class="panel help-panel">
       <h3>How to play</h3>
       <ul>
-        <li><b>Spawn:</b> click on land during the spawn phase. Re-click to move until the timer ends.</li>
-        <li><b>Expand / attack:</b> <b>left-click</b> any land you don't own. The slider (or <kbd>Shift</kbd>+scroll) sets how many troops you send. Neutral land is cheap; players cost troops on both sides. If the target isn't reachable by land, a boat is sent automatically.</li>
-        <li><b>Right-click</b> opens the radial menu: build, boat, alliance, donate, info.</li>
-        <li><b>Build</b> with keys <kbd>1</kbd>–<kbd>0</kbd> or the bottom bar, then click a tile. Cities raise max troops, ports send trade ships for gold, defense posts make attackers bleed, silos launch nukes, SAMs shoot nukes down.</li>
-        <li><b>Walls</b> <kbd>7</kbd>: click-and-drag on your land to draw a line. Enemies must grind every segment down and can't pass behind it. Price climbs steeply with how much wall you own; nukes raze them.</li>
-        <li><b>Mechs</b> <kbd>8</kbd>: hugely expensive walking war machines that hunt hostile land on their own, crush troops and walls, and shrug off most troop fire. Killable by nukes, other mechs and massed troops.</li>
-        <li><b>Research Lab</b> <kbd>6</kbd>: needs 3 Cities, built away from them. Pick 1 of 3 random doctrines (Mech doctrines, War Economy, Mass Production, D-Day, …). Max 2 per game, 60s each.</li>
-        <li><b>Click any nation</b> to see its <b>ATK POWER</b> and <b>ECONOMY</b> — attack power drops while its forces are away fighting.</li>
-        <li><kbd>A</kbd> attack under cursor · <kbd>B</kbd> boat under cursor · <kbd>R</kbd> retaliate against your latest attacker · <kbd>C</kbd> center on you · <kbd>Enter</kbd> chat · <kbd>Esc</kbd> close.</li>
+        <li><b>Spawn:</b> click on land during the spawn phase (10s by default). Re-click to move until the timer ends.</li>
+        <li><b>Expand / attack:</b> <b>left-click</b> any land you don't own. The slider (or <kbd>Shift</kbd>+scroll) sets how many troops you send. While you attack, your expansion leans toward your mouse. If the target isn't reachable by land, a boat is sent automatically. Crossed swords on the map show each attack's front and remaining troops.</li>
+        <li><b>Right-click</b> opens the radial menu: build, boat, alliance, donate, info (the browser menu is disabled in-game).</li>
+        <li><b>Build</b> with keys <kbd>1</kbd>&ndash;<kbd>0</kbd> or the bottom bar, then click a tile. Cities raise max troops, ports send trade ships, defense posts make attackers bleed and shell ships, silos launch nukes, SAMs shoot nukes down.</li>
+        <li><b>Factories</b> <kbd>3</kbd> lay rail to every City/Port/Lab/Factory within 110 tiles and run trains that pay gold on arrival (more when the destination belongs to another nation). Upgrade a factory to <b>level 2</b> to build Mechs; higher levels give tougher, longer-ranged Mechs.</li>
+        <li><b>Walls</b> <kbd>8</kbd>: click-and-drag on your land to draw a 3-tile-thick wall. It snaps to the coast and is built block by block (the slowest build). Enemies must grind it down and can't pass behind it. Price climbs steeply; nukes and mechs raze it.</li>
+        <li><b>Mechs</b> <kbd>9</kbd>: from a level-2 Factory. Click where it should patrol: it walks there and circles, shelling structures, mechs and land in range and stomping the ground &mdash; hit land turns <i>neutral</i>. Slow, land-locked and very tanky, but it bleeds HP inside enemy land. Click it, then a tile, to move it.</li>
+        <li><b>Warships</b> <kbd>0</kbd>: need a Port. Click water to set a patrol area; they hunt boats, trade ships and warships with shells. Click one, then water, to move it.</li>
+        <li><b>Research Lab</b> <kbd>7</kbd>: needs 3 Cities and a Factory within rail range. Pick 1 of 3 random doctrines (Mech, Navy, Air, Defense, Economy, Nuclear&hellip;). Some unlock units &mdash; submarines, naval mines, bomber strikes &mdash; which appear on the bar. Max 2 per game, 60s each.</li>
+        <li><b>Conquering</b> a nation or tribe pays gold based on its size and treasury.</li>
+        <li><b>Click any nation</b> to see its <b>ATK POWER</b> and <b>ECONOMY</b> &mdash; attack power drops while its forces are away fighting.</li>
+        <li><kbd>A</kbd> attack under cursor &middot; <kbd>B</kbd> boat under cursor &middot; <kbd>R</kbd> retaliate against your latest attacker &middot; <kbd>C</kbd> center on you &middot; <kbd>N</kbd>/<kbd>H</kbd> nukes &middot; <kbd>Enter</kbd> chat &middot; <kbd>Esc</kbd> close.</li>
         <li><b>Win</b> by owning 80% of the land (configurable). A player squeezed under 100 tiles is conquered outright.</li>
       </ul>
       <p class="muted small-text">Map data, icons and sprites by <a href="https://github.com/openfrontio/OpenFrontIO" target="_blank" rel="noopener">OpenFront</a> (CC BY-SA 4.0).</p>

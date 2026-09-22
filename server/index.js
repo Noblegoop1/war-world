@@ -171,11 +171,13 @@ class Lobby {
   sendTick(pkt) {
     const events = pkt.events;
     const targeted = events && events.some((e) => e.to);
-    if (!targeted) { this.broadcast(pkt); return; }
-    // some events are private (e.g. "X is attacking you"): filter per client
+    const perClient = targeted || pkt.ships === true;
+    if (!perClient) { this.broadcast(pkt); return; }
+    // some events are private (e.g. "X is attacking you") and submarines are only visible to their owner: filter per client
     for (const c of this.clients) {
       if (!c.ws || c.ws.readyState !== 1) continue;
-      pkt.events = events.filter((e) => !e.to || e.to === c.id);
+      if (events) pkt.events = events.filter((e) => !e.to || e.to === c.id);
+      if (pkt.ships === true || Array.isArray(pkt.ships)) pkt.ships = this.game.shipsPacket(c.player);
       c.send(pkt);
     }
     pkt.events = events;
@@ -224,7 +226,7 @@ class Lobby {
         const borders = target ? players.includes(target) : g.neighborsOf(p).touchesNeutral;
         if (borders) {
           const troops = g.config.attackAmount(p, ratio);
-          if (!g.sendAttack(p, target, troops)) c.send({ t: 'toast', msg: 'Cannot attack' });
+          if (!g.sendAttack(p, target, troops, null, Number.isInteger(m.focus) ? m.focus : -1)) c.send({ t: 'toast', msg: 'Cannot attack' });
         } else {
           this.handleIntent(c, { t: 'boat', tile, ratio });
         }
@@ -256,22 +258,30 @@ class Lobby {
       case 'build': {
         if (tile === null) return;
         const unit = String(m.unit);
-        const r = unit === 'mech' ? g.buildMech(p, tile) : g.build(p, unit, tile);
+        let r;
+        if (unit === 'mech') r = g.buildMech(p, tile, Number.isInteger(m.from) ? m.from : -1);
+        else if (unit === 'warship') r = g.buildWarship(p, tile);
+        else if (unit === 'submarine') r = g.buildSub(p, tile);
+        else if (unit === 'bomber') r = g.launchBomber(p, tile);
+        else r = g.build(p, unit, tile);
         if (!r.ok) c.send({ t: 'toast', msg: r.reason });
         break;
       }
+      case 'moveMech': { const r = g.moveMech(p, Number(m.id), tile); if (!r.ok) c.send({ t: 'toast', msg: r.reason }); break; }
+      case 'moveShip': { const r = g.moveShip(p, Number(m.id), tile); if (!r.ok) c.send({ t: 'toast', msg: r.reason }); break; }
+      case 'reinforce': { if (tile === null) return; const r = g.reinforcePost(p, tile); if (!r.ok) c.send({ t: 'toast', msg: r.reason }); else c.send({ t: 'toast', msg: `Garrisoned ${r.added.toLocaleString()} troops`, info: true }); break; }
+      case 'focus': { if (tile !== null) g.setFocus(p, tile); break; }
       case 'wall': {
-        // a drawn line of tiles; validated server-side for ownership, contiguity and cost
-        const tiles = Array.isArray(m.tiles) ? m.tiles.slice(0, 400).map(Number) : [];
+        // a drawn polyline of waypoints; the server expands it to 3-thick blocks with coast snapping
+        const tiles = Array.isArray(m.tiles) ? m.tiles.slice(0, 200).map(Number) : [];
         const r = g.buildWall(p, tiles);
         if (!r.ok) c.send({ t: 'toast', msg: r.reason });
         break;
       }
       case 'wallQuote': {
-        // cost preview while the player is drawing
-        const tiles = Array.isArray(m.tiles) ? m.tiles.slice(0, 400).map(Number) : [];
-        const r = g.canBuildWall(p, tiles);
-        c.send({ t: 'wallQuote', ok: r.ok, cost: r.ok ? Math.floor(r.cost) : 0, reason: r.reason || '' });
+        const tiles = Array.isArray(m.tiles) ? m.tiles.slice(0, 200).map(Number) : [];
+        const r = g.planWall(p, tiles);
+        c.send({ t: 'wallQuote', ok: r.ok, cost: r.ok ? r.cost : 0, reason: r.reason || '', tiles: r.ok ? r.tiles : [], afford: r.ok ? p.gold >= r.cost : false });
         break;
       }
       case 'research': {
