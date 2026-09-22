@@ -122,6 +122,12 @@ class Player {
   isAttacking() { return this.outgoingAttacks.some((a) => a.target && !a.done); }
 }
 
+// Directional expansion lean (see attackAddNeighbors). FOCUS_PULL scales the terrain term by
+// +-FOCUS_PULL, which is +-20% on an ordinary tile's priority; a focus closer than
+// FOCUS_MIN_DISTANCE tiles to the attack's origin is ignored as noise.
+const FOCUS_PULL = 0.4;
+const FOCUS_MIN_DISTANCE = 8;
+
 class Attack {
   constructor(id, attacker, target, troops, sourceTile) {
     this.id = id;
@@ -138,8 +144,18 @@ class Attack {
     this.nbuf2 = [0, 0, 0, 0];
     this.originX = 0; this.originY = 0;
     this.focus = -1;
+    this.fdx = 0; this.fdy = 0; // unit vector origin -> focus, 0,0 when there is no focus
     this.frontX = 0; this.frontY = 0; // running centroid of the conquering front (for the UI marker)
     this.frontN = 0;
+  }
+  // Cache the pull direction; recomputed whenever the focus or the origin changes.
+  setFocusTile(g, tile) {
+    this.focus = tile;
+    this.fdx = 0; this.fdy = 0;
+    if (tile < 0 || tile >= g.terrain.length) return;
+    const dx = g.x(tile) - this.originX, dy = g.y(tile) - this.originY;
+    const len = Math.hypot(dx, dy);
+    if (len > FOCUS_MIN_DISTANCE) { this.fdx = dx / len; this.fdy = dy / len; }
   }
 }
 
@@ -495,9 +511,9 @@ class Game {
     if (troops < 1) return null;
     p.removeTroops(troops);
     const a = new Attack(newId(), p, target, troops, sourceTile);
-    a.focus = focusTile >= 0 ? focusTile : p.focusTile;
     const c = sourceTile !== null ? { x: this.x(sourceTile), y: this.y(sourceTile) } : (this.centroid(p) || { x: 0, y: 0 });
     a.originX = c.x; a.originY = c.y;
+    a.setFocusTile(this, focusTile >= 0 ? focusTile : p.focusTile);
     if (target) {
       const delta = { easy: -60, medium: -70, hard: -80, impossible: -100 }[this.settings.difficulty] || -70;
       target.updateRelation(p, delta);
@@ -515,7 +531,7 @@ class Game {
     }
     if (sourceTile === null) {
       for (const out of p.outgoingAttacks) {
-        if (!out.done && out.target === target && out.sourceTile === null) { a.troops += out.troops; out.done = true; a.focus = focusTile >= 0 ? focusTile : out.focus; }
+        if (!out.done && out.target === target && out.sourceTile === null) { a.troops += out.troops; out.done = true; a.setFocusTile(this, focusTile >= 0 ? focusTile : out.focus); }
       }
     }
     this.attacks.push(a);
@@ -532,7 +548,7 @@ class Game {
   }
   setFocus(p, tile) {
     p.focusTile = tile;
-    for (const a of p.outgoingAttacks) if (!a.done) a.focus = tile;
+    for (const a of p.outgoingAttacks) if (!a.done) a.setFocusTile(this, tile);
   }
   attackRefreshBorder(a) {
     a.heap.clear();
@@ -542,33 +558,39 @@ class Game {
   // OpenFront's priority: (rand 0-7 + 10) * (1 - ownedNeighbours*0.5 + terrain/2) + tick. Tiles hugging the
   // existing front go first, so the wave stays coherent. War World adds a directional pull (~20%) toward
   // the player's focus tile (mouse position for humans, chosen direction for AI).
+  // OpenFront's frontier rule, unchanged: every tile of the target that touches the tile we just took
+  // is (re-)queued with
+  //     priority = (rand(0..7) + 10) * (1 - numOwnedByMe * 0.5 + mag / 2) + tick
+  // Two things fall out of that and they are what make the territory look the way it does:
+  //  * a tile with 3-4 of its neighbours already ours scores <= 0, so it is taken *this* tick — dents
+  //    in the front fill themselves in before the front moves on, which is what keeps the edge smooth;
+  //  * everything else lands 10-17 ticks in the future, so the front advances as a timed wave rather
+  //    than a race, and rough terrain rides at the back of it.
+  // Re-queueing (rather than skipping tiles already on the border) is deliberate: a tile's priority has
+  // to improve as more of its neighbours fall, or the first estimate freezes the shape.
   attackAddNeighbors(a, tile) {
     const targetSm = a.target ? a.target.smallID : 0;
     const mySm = a.attacker.smallID;
     const n = this.neighbors4(tile, a.nbuf);
-    let fdx = 0, fdy = 0, hasFocus = false;
-    if (a.focus >= 0 && a.focus < this.terrain.length) {
-      fdx = this.x(a.focus) - a.originX; fdy = this.y(a.focus) - a.originY;
-      const fl = Math.hypot(fdx, fdy);
-      if (fl > 8) { fdx /= fl; fdy /= fl; hasFocus = true; }
-    }
     for (let i = 0; i < n; i++) {
       const nb = a.nbuf[i];
       if (!this.isLand(nb) || this.owner[nb] !== targetSm) continue;
-      a.border.add(nb); // re-queued (not skipped) so a tile gets a better priority as more of its neighbours fall
+      a.border.add(nb);
       let numOwnedByMe = 0;
       const m = this.neighbors4(nb, a.nbuf2);
       for (let j = 0; j < m; j++) if (this.owner[a.nbuf2[j]] === mySm) numOwnedByMe++;
       const tt = this.terrainType(nb);
-      const mag = tt === TerrainType.MOUNTAIN ? 2 : tt === TerrainType.HIGHLAND ? 1.5 : 1;
-      let prio = (a.rng.int(0, 7) + 10) * (1 - numOwnedByMe * 0.5 + mag / 2) + this.tick;
-      if (hasFocus) {
-        // how far along the focus direction this tile lies relative to the front: pull those forward
-        const along = (this.x(nb) - a.originX) * fdx + (this.y(nb) - a.originY) * fdy;
-        const rel = within((along - a.frontAlong) / 15, 0, 1); // only tiles ahead of the front, toward the focus
-        prio -= rel * 2.5; // ≈ 20% of the 10-17 priority band: a nudge, not a redirect
+      let mag = tt === TerrainType.MOUNTAIN ? 2 : tt === TerrainType.HIGHLAND ? 1.5 : 1;
+      if (a.fdx !== 0 || a.fdy !== 0) {
+        // Directional lean (ours, not OpenFront's): toward the focus a tile counts as easier ground,
+        // away from it as rougher. Riding on `mag` keeps it inside OpenFront's own term, so it can
+        // never outrank the concavity fill above — the front still smooths itself, it just leans.
+        // +-FOCUS_PULL/2 on mag/2 works out to +-20% on the priority of an ordinary plains tile.
+        const dx = this.x(nb) - a.originX, dy = this.y(nb) - a.originY;
+        const d = Math.hypot(dx, dy);
+        if (d > 0) mag *= 1 - FOCUS_PULL * ((dx * a.fdx + dy * a.fdy) / d);
       }
-      a.heap.push(nb, prio);
+      a.heap.push(nb, (a.rng.int(0, 7) + 10) * (1 - numOwnedByMe * 0.5 + mag / 2) + this.tick);
     }
   }
   hasDefensePostNearby(owner, tile) {
@@ -596,11 +618,6 @@ class Game {
       const borderSize = a.border.size + a.rng.int(0, 5);
       let tickBudget = 1;
       let troops = a.troops;
-      // running "how far along the focus direction is the front" for the directional pull
-      if (a.focus >= 0 && a.frontN > 0) {
-        const fdx = this.x(a.focus) - a.originX, fdy = this.y(a.focus) - a.originY, fl = Math.hypot(fdx, fdy) || 1;
-        a.frontAlong = ((a.frontX / a.frontN - a.originX) * fdx + (a.frontY / a.frontN - a.originY) * fdy) / fl;
-      } else a.frontAlong = 0;
       a.frontX = 0; a.frontY = 0; a.frontN = 0;
       const speedMult = R.attackSpeedMultiplier(attacker);
       const lossMult = R.attackerLossMultiplier(attacker, !!target);
