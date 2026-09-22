@@ -1,13 +1,14 @@
-# OpenFront Lite
+# Frontier
 
-A browser-based, real-time (not turn-based) territory strategy game in the style of
-[OpenFront.io](https://openfront.io): expand over an open top-down map, grow troops, build
-cities/ports/defense posts, send boats, form and break alliances, launch nukes, and win by owning
-most of the land. Play with friends over the network with AI nations and bot tribes filling the map.
+A browser-based, real-time (not turn-based) territory-strategy game built on the mechanics of
+[OpenFront.io](https://github.com/openfrontio/OpenFrontIO): claim a spot on a world map, expand
+tile by tile, and try to hold 80% of the land. Overreach and you run out of troops; sit still and
+your neighbours swallow you. Play with friends online against dozens of AI nations and bot tribes.
 
-The mechanics reproduce OpenFront's balance (troop growth curve, attack cost/speed formulas, unit
-prices, AI difficulty scaling) in an original, much smaller codebase. No build step, no framework:
-Node.js + `ws` on the server, plain HTML/Canvas on the client.
+Frontier reuses OpenFront's real map data, unit sprites and UI icons (CC BY‑SA 4.0) and reproduces
+its balance — the troop-growth curve, the per-tile attack cost/speed formula, unit prices, trade
+income, difficulty scaling — in an original, from-scratch codebase. No build step, no framework:
+Node.js + `ws` on the server, a plain HTML5 canvas on the client.
 
 ## Quick start
 
@@ -16,149 +17,101 @@ npm install
 npm start
 ```
 
-Open <http://localhost:3000>, enter a name, **Create game**, tweak the settings, **Start game**.
+Open <http://localhost:3000>, pick a name, **Create game**, choose a map, **Start game**.
 
-## Hosting a game for friends
+## How to play
 
-The person hosting runs the server; everybody else just opens a URL in a browser. There are three
-ways to make your server reachable, from easiest to most permanent:
+* **Spawn** — during the spawn phase, click on land to claim your starting spot. Re-click to move it
+  until the timer runs out.
+* **Expand / attack** — **left-click** any land you don't own. Neutral land is cheap to take;
+  attacking a player costs troops on both sides and depends on troop density, terrain and defenses.
+  The **attack ratio** (slider, number keys, or **Shift**+scroll) sets how many troops each click
+  commits. Push too fast and you'll bleed out — let troops regrow between attacks. If a target isn't
+  reachable by land, a transport boat is sent automatically.
+* **Right-click** opens a **radial menu**: Build, Boat, Alliance / Donate / Break, and Info. Build
+  again from the wrench for the full structure ring.
+* **Build** (keys **1‑7** or the bottom bar, then click a tile):
+  * **City** — +250K max troops. Build on it again to upgrade.
+  * **Port** — sea coast only. Sends trade ships to other players' ports; both sides earn gold.
+  * **Defense Post** — attackers within 30 tiles lose 5× troops and move 3× slower.
+  * **Missile Silo** — launches atom / hydrogen bombs (90-tick reload).
+  * **SAM Launcher** — shoots down incoming nukes within 70 tiles.
+* **Alliances** — request from a player's radial or the leaderboard. Allies can't attack each other
+  and can donate troops/gold. Breaking one marks you a **traitor** for 30s (weaker defense). Nuking
+  an ally breaks the alliance.
+* **Win** by owning 80% of the land (configurable). Any player squeezed under 100 tiles is
+  conquered outright — the attacker takes their land and half their gold.
 
-### 1. Same Wi-Fi / LAN
+**Keys:** `A` attack under cursor · `B` boat under cursor · `R` retaliate against your latest
+attacker · `C` centre on your territory · `1‑7` build · `[` `]` or Shift+scroll attack ratio ·
+`Enter` chat · `Esc` close · drag / wheel to pan & zoom.
 
-Run `npm start`. The console prints your LAN address, e.g.
+## Maps
 
-```
-  local:  http://localhost:3000
-  LAN:    http://192.168.1.42:3000
-```
+Frontier ships five OpenFront maps (World, Europe, Asia, Oceania, Pangaea) and can download ~35
+more on demand (Africa, the Americas, individual countries, Mars, Luna, …) — they're cached to
+`server/maps-cache/` after first use. Each real map places its actual nations (with country flags)
+where they belong. There are also three procedurally generated map types (Continents, Islands,
+Pangaea) with a seed, for a fresh layout every game. **Compact** map size runs the half-resolution
+version for weaker machines or bigger lobbies.
 
-Friends on the same network open the LAN URL. Create a lobby, then share the game code or click
-**Copy invite link** (`http://192.168.1.42:3000/g/ABCDE`). If it doesn't connect, allow Node.js
-through Windows Firewall (Windows prompts the first time; if you clicked "cancel", go to
-*Windows Security → Firewall → Allow an app* and tick Node.js for private networks).
+## Multiplayer
 
-### 2. Over the internet with a tunnel (no router setup)
+The host runs the server; everyone else just opens a URL — no install. Three ways to be reachable:
 
-Keep `npm start` running and in a second terminal open a tunnel to port 3000:
+1. **Same Wi-Fi** — `npm start` prints your LAN address (e.g. `http://192.168.1.42:3000`). Friends
+   open it; you Create a game and share the code or **Copy invite link** (`…/g/ABCDE`). Allow
+   Node.js through Windows Firewall the first time.
+2. **Over the internet, no router setup** — in a second terminal:
+   `npx cloudflared tunnel --url http://localhost:3000` prints a public `https://…trycloudflare.com`
+   URL anyone can open. ngrok / Tailscale work the same way.
+3. **Host it on a website (permanent URL)** — see below.
 
-```bash
-npx cloudflared tunnel --url http://localhost:3000
-```
+**How it works:** the server is authoritative — it runs the whole 10-ticks-per-second simulation and
+is the only place game state lives, so nothing can be cheated from the page. Clients send *intents*
+("attack this tile with 20%", "build a city here") and receive small per-tick deltas (which tiles
+changed owner, plus stats every half-second). A full snapshot is sent only when you join or
+reconnect. Reconnecting keeps your seat (a per-tab token); while you're gone your nation keeps
+running. The host can pause, change speed, or end the game for everyone.
 
-Cloudflare prints a public `https://something.trycloudflare.com` URL that anyone can open (no
-account needed; the URL changes every time you start the tunnel). [ngrok](https://ngrok.com)
-(`ngrok http 3000`) or [Tailscale](https://tailscale.com) (private network between friends) work
-the same way. WebSockets go through these tunnels fine.
+## Host it on a website
 
-### 3. Host it on a website (permanent URL, nobody has to run anything)
+The server is one Node process that reads `PORT` from the environment. Push this folder to GitHub,
+then:
 
-The server is one Node process that reads `PORT` from the environment, so any Node host works.
-Push this folder to a GitHub repo first (the hosts deploy from it):
+* **Render (free)** — <https://render.com> → *New +* → *Blueprint* → pick the repo (`render.yaml`
+  configures it). Free instances sleep after ~15 min idle; the game pings itself while people play so
+  it won't sleep mid-match.
+* **Railway (~$5/mo, never sleeps)** — *New Project* → *Deploy from GitHub repo* → *Generate Domain*.
+* **Fly.io** — `fly launch --copy-config --yes` then `fly deploy` (uses `fly.toml` + `Dockerfile`).
+* **Any VPS / Docker** — `docker build -t frontier . && docker run -p 80:3000 frontier`.
 
-```bash
-git remote add origin https://github.com/<you>/openfront-lite.git
-git push -u origin main
-```
-
-**Render (free, easiest)** — <https://render.com> → *New +* → *Blueprint* → pick the repo.
-`render.yaml` in this folder configures everything; you get `https://openfront-lite.onrender.com`.
-Free instances sleep after ~15 min idle, so the first visitor waits ~30–60 s for it to wake up
-(the game pings itself while people are playing so it won't sleep mid-game).
-
-**Railway (~$5/mo, never sleeps)** — <https://railway.app> → *New Project* → *Deploy from GitHub
-repo*. It auto-detects Node and `npm start`; open *Settings → Networking → Generate Domain*.
-
-**Fly.io (pay-as-you-go, ~$2/mo)** — install `flyctl`, then `fly launch --copy-config --yes` and
-`fly deploy` (uses `fly.toml` + `Dockerfile`).
-
-**Any VPS / Docker host** — `docker build -t openfront-lite . && docker run -p 80:3000 openfront-lite`,
-or plain `npm ci && PORT=80 npm start` behind Caddy/nginx for HTTPS.
-
-Notes for a public server: every redeploy restarts the process and ends running games (state is
-in memory); a 512 MB instance comfortably runs several medium-map games; `MAX_LOBBIES` (default
-50) caps how many lobbies can exist at once.
-
-* **Port forward** (alternative, from home): forward TCP 3000 on your router to your PC; friends
-  use `http://<your public IP>:3000`.
-
-The server holds any number of lobbies at once; every lobby has its own map and simulation.
-
-## How multiplayer works
-
-* The server is **authoritative**: it runs the whole simulation at 10 ticks/second and is the only
-  place game state lives. Clients never simulate anything, so nobody can cheat by editing the page.
-* Each client sends **intents** (`spawn here`, `attack this tile with 20%`, `build a city here`,
-  `request alliance`...) over a WebSocket. The server validates them against the rules and applies
-  them on the next tick.
-* Every tick the server broadcasts a small **delta**: which tiles changed owner, plus (every 0.5 s)
-  everyone's troops/gold/tiles, active attacks, boats and nukes. A full snapshot (~200 KB for a
-  medium map) is sent only when you join or reconnect.
-* **Reconnecting**: your seat is tied to a token stored in the browser tab. If your page reloads or
-  your connection drops, you re-join the same game with the same territory. While you're gone your
-  nation keeps running (AI nations notice AFK players).
-* **Lobbies**: the host creates a lobby (5-letter code / invite link), changes settings, and starts
-  the game. Public lobbies show up on the main menu for anyone on the server. The host can end a
-  game for everyone from the leaderboard panel.
+Every redeploy restarts the process and ends running games (state is in memory), so push between
+sessions. `MAX_LOBBIES` (default 50) caps concurrent games; a 512 MB instance handles several.
 
 ## Settings
 
-| Setting | What it does |
-| --- | --- |
-| Map size / type / seed | Procedural map: continents, islands or pangaea. Same seed = same map. |
-| AI nations | Real opponents: expand, attack the weakest neighbour, retaliate, boat to islands, build cities/ports/defense posts, save for silos and nuke, form and betray alliances. |
-| Bots | Small tribes that mostly just expand (fodder, like OpenFront's bots). |
-| AI difficulty | Easy → Impossible scales nation start troops, max troops, growth, reaction time and how smart the target selection is. |
-| Spawn phase | Seconds everyone gets to pick a spawn. Unpicked players get a random spot. |
-| Game speed | 0.5× – 3× simulation speed. |
-| % of land to win | Win condition (OpenFront uses 80). |
-| Starting gold, infinite gold/troops, instant build | Sandbox / practice options (infinite applies to humans). |
-| Disable nukes / boats | Remove those mechanics. |
-
-## Mechanics cheat-sheet
-
-* **Troops** grow each tick by `10 + troops^0.73 / 4`, scaled down as you approach your max.
-  Max troops = `2 × (tiles^0.6 × 1000 + 50 000) + 250 000 per city level`.
-* **Attacking**: pick a % with the slider (or keys 1–0) and click land → Attack. Attacks spread tile
-  by tile from your border. Neutral land costs ~16 troops per plains tile; attacking a player costs
-  both sides troops depending on troop density, terrain (highland/mountain are slower and
-  bloodier), defense posts (5× losses, 3× slower) and fallout. Clicking a target you don't touch by
-  land sends a boat instead. **Retreat** returns survivors (25% penalty when attacking a player).
-* A player reduced to fewer than 100 tiles while under attack is conquered outright (the attacker
-  takes their land and half their gold).
-* **Gold**: 100/tick base + a little per tile + 120/tick per port level. Costs: city/port
-  125K×2ⁿ (cap 1M), defense post 50K×(n+1), silo 1M, SAM 1.5M×(n+1), atom bomb 750K,
-  hydrogen bomb 5M. Cities and ports can be upgraded by building on them again.
-* **Nukes** need a ready silo (90-tick cooldown). Atom bomb: 10-tile kill radius, 25-tile blast;
-  H-bomb: 40/60. Hit tiles become neutral fallout (very expensive to conquer), structures inside
-  are destroyed, victims lose troops proportional to the land lost. SAMs shoot down nukes within
-  70 tiles. Nuking an ally breaks the alliance.
-* **Alliances**: request from the tile/leaderboard menu; the other side accepts or rejects (AI
-  decides based on relations and relative strength). Allies can't attack each other and can donate
-  troops/gold. Breaking an alliance makes you a *traitor* for 30 s (1.5× losses on defense).
-
-## Controls
-
-| Input | Action |
-| --- | --- |
-| Left click | Open the tile menu (attack / boat / build / nuke / ally) |
-| Drag, mouse wheel, arrows, `+`/`-` | Pan and zoom |
-| `A` / `B` | Quick attack / boat attack the hovered tile with the current % |
-| `1`–`9`, `0` | Set attack % to 10–90, 100 |
-| Hotbar buttons | Enter placement mode, then click where to build (hold Shift to place several) |
-| `Enter` | Chat · `Esc` closes menus / cancels placement |
+Map, map size (normal/compact), random-map seed, AI nation count, bot count, AI difficulty
+(Easy→Impossible scales start troops, max troops, growth, reaction speed and targeting smarts),
+spawn-phase length, game speed (0.5×–3×), % of land to win, starting gold, and toggles for
+nukes/boats and infinite gold/troops/instant-build sandbox play.
 
 ## Project layout
 
 ```
-server/index.js        HTTP + WebSocket server, lobbies, intent handling
-server/game/config.js  All balance numbers and formulas
-server/game/map.js     Procedural map generator
-server/game/game.js    Simulation: players, attacks, boats, structures, nukes, alliances
+server/index.js        HTTP + WebSocket server, lobbies, host controls, intent handling, flag proxy
+server/game/config.js  All balance numbers, formulas and colour palettes
+server/game/maps.js    Map catalog + loader (OpenFront .bin format) + procedural generator
+server/game/game.js    Simulation: players, attacks, boats, trade, structures, nukes, alliances
 server/game/ai.js      Nation AI and bot AI
-public/                Client: lobby UI + canvas renderer + input
+public/                Client: menu/lobby UI, canvas renderer, radial menu, input
+public/assets/         OpenFront icons & sprites (CC BY-SA 4.0)
+server/maps/           Five bundled OpenFront maps (CC BY-SA 4.0)
 ```
 
 ## Credits
 
-Game design and balance formulas are modelled on [OpenFront.io](https://github.com/openfrontio/OpenFrontIO)
-(AGPL-3.0). This project is an independent re-implementation and shares no code with it.
+Game design, balance, map data, sprites and icons are from
+[OpenFront.io](https://github.com/openfrontio/OpenFrontIO), licensed **CC BY-SA 4.0** (attribution:
+OpenFront / OpenFront Inc.). Source code (AGPL-3.0) was not used — this is an independent
+re-implementation of the same rules. See `public/assets/LICENSE.txt`.

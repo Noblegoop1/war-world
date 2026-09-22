@@ -18,6 +18,7 @@ class NationAI {
     this.lastStructureTick = -10000;
     this.placements = 0;
     this.spawnAttemptTick = this.rng.int(0, 20);
+    this.spawnTries = 0;
   }
 
   get difficulty() { return this.cfg.difficulty(); }
@@ -27,7 +28,9 @@ class NationAI {
     const g = this.game, p = this.p;
     if (g.phase === 'spawn') {
       if (!p.spawned && g.tick >= this.spawnAttemptTick) {
-        const t = g.randomSpawnTile(this.cfg.minDistanceBetweenPlayers());
+        // spawn near the map's real nation position when we have one, else anywhere
+        let t = p.nationSpawn ? g.randomSpawnTile(this.cfg.minDistanceBetweenPlayers() * 0.5, p.nationSpawn) : null;
+        if (t === null && (!p.nationSpawn || this.spawnTries++ > 3)) t = g.randomSpawnTile(this.cfg.minDistanceBetweenPlayers());
         if (t !== null) g.spawn(p, t);
         else this.spawnAttemptTick = g.tick + 10;
       }
@@ -204,11 +207,11 @@ class NationAI {
     return this.game.sendAttack(this.p, target, troops) !== null;
   }
 
-  shoreTiles(player, limit = 400) {
+  shoreTiles(player, limit = 400, ocean = false) {
     const g = this.game;
     const out = [];
     for (const t of player.border) {
-      if (g.isShore(t)) { out.push(t); if (out.length >= limit) break; }
+      if (ocean ? g.isOceanShore(t) : g.isShore(t)) { out.push(t); if (out.length >= limit) break; }
     }
     return out;
   }
@@ -312,7 +315,7 @@ class NationAI {
     let fallback = null;
     for (let i = 0; i < tries; i++) {
       const t = g.randomTileOf(p.tiles, this.rng);
-      if (requireShore) { if (g.isShore(t)) return t; continue; }
+      if (requireShore) { if (g.isOceanShore(t)) return t; continue; }
       if (!p.border.has(t)) {
         fallback = fallback ?? t;
         // prefer tiles whose neighbours are also inner
@@ -332,7 +335,7 @@ class NationAI {
     const ports = p.unitsOf(UnitType.PORT).length;
     const silos = p.unitsOf(UnitType.SILO).length;
     const sams = p.unitsOf(UnitType.SAM).length;
-    const coastal = this.shoreTiles(p, 1).length > 0;
+    const coastal = this.shoreTiles(p, 1, true).length > 0;
     const troopRatio = p.troops / this.cfg.maxTroops(p);
     const enemiesHaveSilos = g.units.some((u) => u.type === UnitType.SILO && u.owner !== p && !p.isFriendly(u.owner));
 
@@ -423,7 +426,7 @@ class BotAI {
     const g = this.game, p = this.p;
     if (g.phase === 'spawn') {
       if (!p.spawned && g.tick >= this.spawnAttemptTick) {
-        const t = g.randomSpawnTile(g.config.minDistanceBetweenPlayers() * 0.6);
+        const t = g.randomSpawnTile(g.config.minDistanceBetweenPlayers() * 0.5);
         if (t !== null) g.spawn(p, t);
         else this.spawnAttemptTick = g.tick + 10;
       }

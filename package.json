@@ -1,7 +1,7 @@
 {
-  "name": "openfront-lite",
+  "name": "frontier",
   "version": "0.1.0",
-  "description": "A browser-based real-time territory strategy game (OpenFront.io-style) with multiplayer and AI nations.",
+  "description": "Frontier: a real-time browser territory-strategy game built on OpenFront.io mechanics, with online multiplayer and AI nations.",
   "main": "server/index.js",
   "type": "commonjs",
   "scripts": {

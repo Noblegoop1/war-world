@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>OpenFront Lite</title>
+<title>Frontier</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="stylesheet" href="/style.css">
 </head>
@@ -10,33 +10,34 @@
 
 <!-- ===================== MENU ===================== -->
 <div id="screen-menu" class="screen">
-  <div class="panel menu-panel">
-    <h1>OpenFront <span>Lite</span></h1>
-    <p class="sub">Real-time territory strategy. Expand, build, ally, betray, nuke.</p>
-    <label>Your name <input id="name-input" maxlength="20" placeholder="Player"></label>
-    <div class="row">
-      <button id="btn-create" class="primary">Create game</button>
+  <div class="menu-wrap">
+    <div class="panel menu-panel">
+      <h1>FRONTIER</h1>
+      <p class="sub">Real-time territory strategy. Expand, build, trade, ally, betray, nuke.</p>
+      <label class="field">Your name <input id="name-input" maxlength="20" placeholder="Player"></label>
+      <div class="row">
+        <button id="btn-create" class="primary big">Create game</button>
+      </div>
+      <div class="row">
+        <input id="join-code" maxlength="5" placeholder="GAME CODE" style="text-transform:uppercase;flex:1">
+        <button id="btn-join" class="big">Join</button>
+      </div>
+      <h3>Public games <button id="btn-refresh" class="small">Refresh</button></h3>
+      <div id="public-list" class="list"><div class="muted">No public games right now.</div></div>
+      <div id="menu-status" class="muted"></div>
     </div>
-    <div class="row">
-      <input id="join-code" maxlength="5" placeholder="GAME CODE" style="text-transform:uppercase">
-      <button id="btn-join">Join</button>
-    </div>
-    <h3>Public games <button id="btn-refresh" class="small">Refresh</button></h3>
-    <div id="public-list" class="list"><div class="muted">No public games right now.</div></div>
-    <div id="menu-status" class="muted"></div>
-    <details class="help">
-      <summary>How to play</summary>
+    <div class="panel help-panel">
+      <h3>How to play</h3>
       <ul>
-        <li><b>Spawn phase:</b> click on land to pick your start. You can re-pick until the timer ends.</li>
-        <li><b>Attack:</b> click a tile → <b>Attack</b>. The slider sets what % of your troops you send. Attacks on neutral land are cheap; attacking players costs troops on both sides.</li>
-        <li><b>Boats:</b> clicking land you don't border by land sends a transport ship across water (max 3 at once).</li>
-        <li><b>Troops</b> grow toward your max (bigger territory + cities = higher max). <b>Gold</b> ticks in constantly; ports add more.</li>
-        <li><b>Build:</b> City (+250k max troops), Port (gold, coast only), Defense Post (5x losses for attackers nearby), Missile Silo (launch nukes), SAM (shoots down nukes).</li>
-        <li><b>Alliances:</b> click a player → Ally. Allies can't attack each other and can donate troops. Breaking one marks you as a traitor for 30s (weaker defense).</li>
-        <li><b>Win:</b> own 80% of the land (configurable).</li>
-        <li>Keys: <kbd>A</kbd> attack hovered tile, <kbd>B</kbd> boat, <kbd>1</kbd>–<kbd>0</kbd> set attack %, <kbd>Enter</kbd> chat, <kbd>Esc</kbd> close menus, drag / wheel to pan &amp; zoom.</li>
+        <li><b>Spawn:</b> click on land during the spawn phase. Re-click to move until the timer ends.</li>
+        <li><b>Expand / attack:</b> <b>left-click</b> any land you don't own. The slider (or <kbd>Shift</kbd>+scroll) sets how many troops you send. Neutral land is cheap; players cost troops on both sides. If the target isn't reachable by land, a boat is sent automatically.</li>
+        <li><b>Right-click</b> opens the radial menu: build, boat, alliance, donate, info.</li>
+        <li><b>Build</b> with keys <kbd>1</kbd>–<kbd>7</kbd> or the bottom bar, then click a tile. Cities raise max troops, ports send trade ships for gold, defense posts make attackers bleed, silos launch nukes, SAMs shoot nukes down.</li>
+        <li><kbd>A</kbd> attack under cursor · <kbd>B</kbd> boat under cursor · <kbd>R</kbd> retaliate against your latest attacker · <kbd>C</kbd> center on you · <kbd>Enter</kbd> chat · <kbd>Esc</kbd> close.</li>
+        <li><b>Win</b> by owning 80% of the land (configurable). A player squeezed under 100 tiles is conquered outright.</li>
       </ul>
-    </details>
+      <p class="muted small-text">Map data, icons and sprites by <a href="https://github.com/openfrontio/OpenFrontIO" target="_blank" rel="noopener">OpenFront</a> (CC BY-SA 4.0).</p>
+    </div>
   </div>
 </div>
 
@@ -66,16 +67,12 @@
         <h3>Game settings <span id="settings-note" class="muted"></span></h3>
         <label>Game name <input name="name" maxlength="32"></label>
         <label>Public lobby <input type="checkbox" name="public"></label>
-        <label>Max humans <input type="number" name="maxHumans" min="1" max="32"></label>
-        <label>Map size
-          <select name="mapSize"><option value="small">Small (500×310)</option><option value="medium">Medium (800×500)</option><option value="large">Large (1100×690)</option><option value="huge">Huge (1500×940)</option></select>
-        </label>
-        <label>Map type
-          <select name="mapType"><option value="continents">Continents</option><option value="islands">Islands</option><option value="pangaea">Pangaea</option></select>
-        </label>
-        <label>Map seed (0 = random) <input type="number" name="seed" min="0" max="2147483647"></label>
-        <label>AI nations <input type="number" name="nations" min="0" max="40"></label>
-        <label>Bots (small tribes) <input type="number" name="bots" min="0" max="200"></label>
+        <label>Map <select name="map"></select></label>
+        <label>Map size <select name="mapSize"><option value="normal">Normal</option><option value="compact">Compact (faster)</option></select></label>
+        <label>Max humans <input type="number" name="maxHumans" min="1" max="64"></label>
+        <label>Random-map seed (0 = random) <input type="number" name="seed" min="0" max="2147483647"></label>
+        <label>AI nations <input type="number" name="nations" min="0" max="120"></label>
+        <label>Bots (small tribes) <input type="number" name="bots" min="0" max="400"></label>
         <label>AI difficulty
           <select name="difficulty"><option value="easy">Easy</option><option value="medium">Medium</option><option value="hard">Hard</option><option value="impossible">Impossible</option></select>
         </label>
@@ -96,41 +93,68 @@
 <!-- ===================== GAME ===================== -->
 <div id="screen-game" class="screen hidden">
   <canvas id="game-canvas"></canvas>
+  <div id="loading" class="overlay hidden"><div class="panel"><h3>Loading map…</h3></div></div>
 
-  <div id="hud-top-left" class="hud">
-    <div id="me-name" class="me-name"></div>
-    <div class="stat"><span class="k">Troops</span><span id="me-troops" class="v"></span></div>
-    <div class="stat"><span class="k">Gold</span><span id="me-gold" class="v"></span></div>
-    <div class="stat"><span class="k">Land</span><span id="me-land" class="v"></span></div>
-    <div id="me-attacks" class="attacks"></div>
-  </div>
-
-  <div id="hud-top-center" class="hud">
-    <div id="phase-banner"></div>
-  </div>
-
-  <div id="hud-top-right" class="hud">
-    <div class="lb-head">Leaderboard <span><button id="btn-end-game" class="small danger hidden" title="Host: end the game for everyone">End game</button> <button id="btn-leave-game" class="small" title="Leave this game">Leave</button> <button id="btn-lb-toggle" class="small">−</button></span></div>
-    <table id="leaderboard"></table>
-  </div>
-
-  <div id="hud-bottom" class="hud">
-    <div class="ratio-row">
-      <span class="k">Attack with</span>
-      <input id="ratio" type="range" min="1" max="100" value="20">
-      <span id="ratio-label">20% · 0</span>
+  <!-- top-left: leaderboard + events + attacks -->
+  <div id="left-col">
+    <div id="leaderboard-panel" class="hud">
+      <div class="panel-head"><span>Leaderboard</span><button id="btn-lb-toggle" class="icon-btn" title="Collapse">−</button></div>
+      <table id="leaderboard"></table>
     </div>
-    <div id="hotbar" class="hotbar"></div>
+    <div id="events-panel" class="hud">
+      <div class="panel-head"><span>Events</span><span><button id="btn-chat" class="icon-btn" title="Chat (Enter)">💬</button><button id="btn-ev-toggle" class="icon-btn" title="Collapse">−</button></span></div>
+      <div id="event-log" class="event-log"></div>
+      <div id="chat-row" class="hidden"><input id="game-chat-input" placeholder="Say something… (Enter)" maxlength="200"></div>
+    </div>
+    <div id="attacks-panel" class="hud hidden"></div>
   </div>
 
-  <div id="hud-bottom-left" class="hud">
-    <div id="event-log" class="event-log"></div>
-    <input id="game-chat-input" placeholder="Press Enter to chat" maxlength="200">
+  <!-- top-center: phase banner + hover card -->
+  <div id="top-center">
+    <div id="phase-banner" class="hud hidden"></div>
+    <div id="player-card" class="hud hidden"></div>
   </div>
 
-  <div id="ally-requests" class="hud"></div>
-  <div id="ctx-menu" class="ctx hidden"></div>
+  <!-- top-right: controls -->
+  <div id="top-right" class="hud">
+    <span id="game-timer">00:00</span>
+    <button id="btn-speed" class="icon-btn" title="Game speed (host)">⏩</button>
+    <button id="btn-pause" class="icon-btn" title="Pause (host)">⏸</button>
+    <button id="btn-settings" class="icon-btn" title="Settings">⚙</button>
+    <button id="btn-fullscreen" class="icon-btn" title="Fullscreen">⛶</button>
+    <button id="btn-exit" class="icon-btn" title="Leave game">⏏</button>
+  </div>
+  <div id="settings-popup" class="hud hidden">
+    <label><input type="checkbox" id="opt-labels" checked> Show names</label>
+    <label><input type="checkbox" id="opt-structures" checked> Show structures</label>
+    <label><input type="checkbox" id="opt-events" checked> Show events</label>
+    <div id="host-controls" class="hidden">
+      <div class="muted">Host</div>
+      <label>Speed <select id="opt-speed"><option value="0.5">0.5×</option><option value="1">1×</option><option value="1.5">1.5×</option><option value="2">2×</option><option value="3">3×</option></select></label>
+      <button id="btn-end-game" class="danger small">End game for everyone</button>
+    </div>
+  </div>
+
+  <!-- bottom-center: control panel -->
+  <div id="control-panel" class="hud">
+    <div class="cp-row">
+      <div class="cp-box" id="cp-income" title="Troop income per second">+0/s</div>
+      <div class="cp-troops" id="cp-troops" title="Troops / max troops"><div class="cp-troops-fill" id="cp-troops-fill"></div><span id="cp-troops-text">0 / 0</span></div>
+      <div class="cp-box gold" id="cp-gold" title="Gold">0</div>
+    </div>
+    <div class="cp-row">
+      <div class="cp-ratio" title="Share of troops sent per attack (Shift+scroll to change)">
+        <span id="ratio-label">⚔ 20% (0)</span>
+        <input id="ratio" type="range" min="1" max="100" value="20">
+      </div>
+    </div>
+    <div class="cp-row" id="hotbar"></div>
+  </div>
+  <div id="hotbar-tip" class="hud hidden"></div>
+
+  <div id="radial" class="hidden"></div>
   <div id="toasts"></div>
+  <div id="spectate-banner" class="hidden"></div>
 
   <div id="game-over" class="overlay hidden">
     <div class="panel">

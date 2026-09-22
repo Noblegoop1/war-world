@@ -8,9 +8,9 @@ const crypto = require('crypto');
 const { WebSocketServer } = require('ws');
 
 const { Game } = require('./game/game');
-const { generateMap } = require('./game/map');
+const maps = require('./game/maps');
 const { NationAI, BotAI } = require('./game/ai');
-const { sanitizeSettings, MAP_SIZES, PlayerType, TICKS_PER_SECOND } = require('./game/config');
+const { sanitizeSettings, PlayerType, TICKS_PER_SECOND } = require('./game/config');
 
 const PORT = Number(process.env.PORT) || 3000;
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
@@ -23,6 +23,7 @@ const MIME = {
 const server = http.createServer((req, res) => {
   let urlPath = decodeURIComponent((req.url || '/').split('?')[0]);
   if (urlPath === '/healthz') { res.writeHead(200, { 'Content-Type': 'text/plain' }); return res.end('ok'); }
+  if (urlPath.startsWith('/flags/')) return serveFlag(urlPath.slice(7), res);
   if (urlPath === '/') urlPath = '/index.html';
   if (urlPath.startsWith('/g/')) urlPath = '/index.html'; // join links: /g/CODE
   const file = path.normalize(path.join(PUBLIC_DIR, urlPath));
@@ -33,6 +34,21 @@ const server = http.createServer((req, res) => {
     res.end(data);
   });
 });
+
+// Country flags for nations (OpenFront assets, CC BY-SA 4.0) - fetched once and cached on disk.
+const FLAG_DIR = path.join(__dirname, 'maps-cache', 'flags');
+function serveFlag(name, res) {
+  if (!/^[A-Za-z0-9_-]{1,32}\.svg$/.test(name)) { res.writeHead(404); return res.end(); }
+  const file = path.join(FLAG_DIR, name);
+  const send = (data) => { res.writeHead(200, { 'Content-Type': 'image/svg+xml', 'Cache-Control': 'public, max-age=86400' }); res.end(data); };
+  fs.readFile(file, (err, data) => {
+    if (!err) return send(data);
+    fetch(`https://raw.githubusercontent.com/openfrontio/OpenFrontIO/${maps.ASSET_COMMIT}/resources/flags/${name}`)
+      .then((r) => (r.ok ? r.arrayBuffer() : Promise.reject(new Error(String(r.status)))))
+      .then((buf) => { const b = Buffer.from(buf); fs.mkdirSync(FLAG_DIR, { recursive: true }); fs.writeFile(file, b, () => {}); send(b); })
+      .catch(() => { res.writeHead(404); res.end(); });
+  });
+}
 
 // ---- Lobbies -----------------------------------------------------------------
 const lobbies = new Map(); // code -> Lobby
@@ -75,6 +91,8 @@ class Lobby {
     this.createdAt = Date.now();
     this.chat = [];
     this.tickAccumulator = 0;
+    this.paused = false;
+    this.starting = false;
   }
   get inGame() { return this.game !== null; }
   summary() {
@@ -85,6 +103,7 @@ class Lobby {
       players: [...this.clients].map((c) => ({ id: c.id, name: c.name, host: c === this.host, online: !!(c.ws && c.ws.readyState === 1) })),
       settings: this.settings,
       inGame: this.inGame,
+      starting: this.starting,
     };
   }
   broadcast(obj, filter) {
@@ -96,28 +115,41 @@ class Lobby {
   }
   broadcastLobby() { this.broadcast({ t: 'lobby', lobby: this.summary() }); }
 
-  start() {
-    if (this.game) return;
+  async start() {
+    if (this.game || this.starting) return;
+    this.starting = true;
+    this.broadcastLobby();
     const s = this.settings;
-    const [w, h] = MAP_SIZES[s.mapSize];
     const seed = s.seed || crypto.randomInt(1, 2147483647);
-    const map = generateMap(w, h, seed, s.mapType);
+    let map;
+    try {
+      map = await maps.loadMap(s.map, { compact: s.mapSize === 'compact', seed });
+    } catch (e) {
+      console.error(`[${this.code}] map load failed`, e);
+      this.starting = false;
+      this.broadcast({ t: 'error', msg: `Could not load map "${s.map}": ${e.message}` });
+      this.broadcastLobby();
+      return;
+    }
+    if (this.clients.size === 0) { this.starting = false; return; }
     const game = new Game({ ...s, seed }, map);
     for (const c of this.clients) {
       c.player = game.addPlayer({ id: c.id, name: c.name, type: PlayerType.HUMAN });
     }
     game.addAIPlayers(NationAI, BotAI);
     this.game = game;
+    this.starting = false;
+    this.paused = false;
     const full = game.fullState();
-    for (const c of this.clients) c.send({ t: 'start', code: this.code, you: c.player.smallID, state: full });
-    this.lastTime = Date.now();
+    for (const c of this.clients) c.send({ t: 'start', code: this.code, you: c.player.smallID, state: full, ctl: this.ctl() });
     this.timer = setInterval(() => this.loop(), 1000 / TICKS_PER_SECOND);
-    console.log(`[${this.code}] game started: ${w}x${h} seed=${seed} humans=${this.clients.size} nations=${s.nations} bots=${s.bots}`);
+    console.log(`[${this.code}] game started: ${map.id} ${map.width}x${map.height} seed=${seed} humans=${this.clients.size} nations=${s.nations} bots=${s.bots}`);
   }
+  ctl() { return { t: 'ctl', paused: this.paused, speed: this.settings.gameSpeed }; }
 
   loop() {
     const game = this.game;
-    if (!game) return;
+    if (!game || this.paused) return;
     // gameSpeed > 1 runs extra sim ticks per real tick
     this.tickAccumulator += this.settings.gameSpeed;
     let steps = 0;
@@ -208,6 +240,19 @@ class Lobby {
       case 'retreat':
         g.retreatAttack(p, Number(m.id));
         break;
+      case 'attackPlayer': {
+        // attack a player by id: by land if we border them, otherwise by boat to their nearest coast
+        const o = g.playersBySmall[Number(m.p)];
+        if (!o || o === p || !p.alive || !o.alive || p.isFriendly(o)) return;
+        const troops = g.config.attackAmount(p, ratio);
+        if (g.neighborsOf(p).players.includes(o)) { if (!g.sendAttack(p, o, troops)) c.send({ t: 'toast', msg: 'Cannot attack' }); }
+        else {
+          let sent = false;
+          for (const t of o.border) { if (g.isShore(t) && g.sendBoat(p, t, troops)) { sent = true; break; } }
+          if (!sent) c.send({ t: 'toast', msg: `No way to reach ${o.name}` });
+        }
+        break;
+      }
       case 'build': {
         if (tile === null) return;
         const r = g.build(p, String(m.unit), tile);
@@ -252,7 +297,7 @@ function publicLobbies() {
 
 // ---- WebSocket ----------------------------------------------------------------
 const MAX_LOBBIES = Number(process.env.MAX_LOBBIES) || 50;
-const wss = new WebSocketServer({ server, maxPayload: 16 * 1024 });
+const wss = new WebSocketServer({ server, maxPayload: 16 * 1024, perMessageDeflate: { threshold: 8192 } });
 
 wss.on('connection', (ws) => {
   let client = null;
@@ -269,14 +314,14 @@ wss.on('connection', (ws) => {
       client.ws = ws;
       client.lastSeen = Date.now();
       if (typeof m.name === 'string' && m.name.trim()) client.name = m.name.trim().slice(0, 20);
-      client.send({ t: 'welcome', token, id: client.id, name: client.name, lan: lanAddresses(), port: PORT });
+      client.send({ t: 'welcome', token, id: client.id, name: client.name, lan: lanAddresses(), port: PORT, maps: maps.catalog() });
       // reconnect into an ongoing lobby/game
       if (client.lobby) {
         const l = client.lobby;
         if (l.game && client.player) {
           client.player.disconnected = false;
           client.send({ t: 'lobby', lobby: l.summary() });
-          client.send({ t: 'start', code: l.code, you: client.player.smallID, state: l.game.fullState() });
+          client.send({ t: 'start', code: l.code, you: client.player.smallID, state: l.game.fullState(), ctl: l.ctl() });
         } else {
           client.send({ t: 'lobby', lobby: l.summary() });
         }
@@ -298,7 +343,7 @@ wss.on('connection', (ws) => {
       case 'create': {
         if (lobbies.size >= MAX_LOBBIES) return client.send({ t: 'error', msg: 'Server is full, try again later' });
         if (client.lobby) client.lobby.removeClient(client);
-        const lobby = new Lobby(client, sanitizeSettings(m.settings));
+        const lobby = new Lobby(client, sanitizeSettings(m.settings, maps.isValidMapId));
         lobbies.set(lobby.code, lobby);
         client.lobby = lobby;
         lobby.broadcastLobby();
@@ -324,7 +369,7 @@ wss.on('connection', (ws) => {
         break;
       case 'settings':
         if (client.lobby && client.lobby.host === client && !client.lobby.inGame) {
-          client.lobby.settings = sanitizeSettings(m.settings);
+          client.lobby.settings = sanitizeSettings(m.settings, maps.isValidMapId);
           client.lobby.broadcastLobby();
         }
         break;
@@ -341,6 +386,18 @@ wss.on('connection', (ws) => {
       }
       case 'endGame':
         if (client.lobby && client.lobby.host === client && client.lobby.inGame) client.lobby.endGame();
+        break;
+      case 'pause':
+        if (client.lobby && client.lobby.host === client && client.lobby.inGame) {
+          client.lobby.paused = !!m.on;
+          client.lobby.broadcast(client.lobby.ctl());
+        }
+        break;
+      case 'speed':
+        if (client.lobby && client.lobby.host === client && client.lobby.inGame) {
+          const v = Number(m.v);
+          if ([0.5, 1, 1.5, 2, 3].includes(v)) { client.lobby.settings.gameSpeed = v; client.lobby.broadcast(client.lobby.ctl()); }
+        }
         break;
       default:
         if (client.lobby) client.lobby.handleIntent(client, m);
@@ -374,7 +431,7 @@ function lanAddresses() {
 }
 
 server.listen(PORT, () => {
-  console.log(`OpenFront-lite server running:`);
+  console.log(`Frontier server running:`);
   console.log(`  local:  http://localhost:${PORT}`);
   for (const a of lanAddresses()) console.log(`  LAN:    http://${a}:${PORT}`);
 });

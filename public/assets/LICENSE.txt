@@ -1,0 +1,1 @@
+﻿Icons, sprites and map data in this folder (and server/maps) are from OpenFront (https://github.com/openfrontio/OpenFrontIO, commit 8a20597f6631e733f40e9a1dec2d2012cc916df4), licensed CC BY-SA 4.0. Attribution: OpenFront / OpenFront Inc. https://creativecommons.org/licenses/by-sa/4.0/

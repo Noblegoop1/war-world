@@ -1,7 +1,7 @@
 # Render.com blueprint: New + -> Blueprint -> pick this repo, and it creates the service.
 services:
   - type: web
-    name: openfront-lite
+    name: frontier
     runtime: node
     plan: free
     buildCommand: npm ci
