@@ -3,8 +3,18 @@
 // ordered to a patrol point like a warship. They hold and circle that spot, shelling hostile structures, mechs,
 // ships (if amphibious) and land within range, and stomp the ground around them. Land hit by a mech is NOT
 // claimed — it becomes empty land for troops to take. Mechs are slow, land-locked (Amphibious doctrine allows
-// water), super tanky, and bleed HP while standing in hostile territory. Mixed into Game.prototype.
-const { UnitType, PlayerType } = require('./config');
+// water), super tanky, and bleed HP while standing in hostile territory.
+//
+// Each mech runs one of four standing orders (`mode`):
+//   hold    - sit on the patrol point it was given and circle it (the default, what a click sets)
+//   roam    - walk its owner's border, favouring the stretch closest to trouble
+//   defend  - answer incoming attacks: nearest first, then whichever is throwing the most troops
+//   assault - march into one named nation and keep wrecking whatever is in range
+// A mech also anchors ground: attacks near one bleed 3x troops and crawl at half speed (see config
+// mechAuraRange / mechDefenseBonus). Mixed into Game.prototype.
+const { UnitType, PlayerType, within } = require('./config');
+const MECH_MODES = ['hold', 'roam', 'defend', 'assault'];
+const REORDER_INTERVAL = 40;   // ticks between standing-order re-evaluations
 const { newId } = require('./ids');
 const { astar, resamplePath } = require('./path');
 const R = require('./research').effects;
@@ -31,7 +41,8 @@ module.exports = {
     const lvl = c.factory.level;
     const hp = this.config.mechBaseHp(p, lvl);
     const m = { id: newId(), owner: p, level: lvl, x: this.x(c.factory.tile) + 0.5, y: this.y(c.factory.tile) + 0.5, hp, maxHp: hp, range: this.config.mechRange(p, lvl),
-      patrol: targetTile, pts: [], idx: 0, wanderAt: 0, cannonReady: this.tick + 20, stompReady: this.tick + 10, engaged: false, engagedUntil: 0, onWater: false, done: false };
+      patrol: targetTile, pts: [], idx: 0, wanderAt: 0, cannonReady: this.tick + 20, stompReady: this.tick + 10, engaged: false, engagedUntil: 0, onWater: false, done: false,
+      mode: 'hold', orderTarget: 0, reorderAt: 0 };
     p.mechs.push(m);
     this.mechs.push(m);
     this.mechPathTo(m, targetTile);
@@ -43,8 +54,76 @@ module.exports = {
     if (!m) return { ok: false, reason: 'No such mech' };
     if (!this.isLand(tile) && !(R.mechAmphibious(p) && this.isWater(tile))) return { ok: false, reason: R.mechAmphibious(p) ? 'Pick a land or water tile' : 'Mechs are land-locked' };
     m.patrol = tile;
+    m.mode = 'hold';
     this.mechPathTo(m, tile);
     return { ok: true };
+  },
+  // Standing orders. `targetSm` only matters for 'assault' and must be a nation we may attack.
+  setMechMode(p, id, mode, targetSm = 0) {
+    if (!MECH_MODES.includes(mode)) return { ok: false, reason: 'Unknown mech order' };
+    const mechs = id > 0 ? this.mechs.filter((x) => x.id === id && x.owner === p && !x.done) : p.mechs.filter((x) => !x.done);
+    if (!mechs.length) return { ok: false, reason: 'No such mech' };
+    let target = 0;
+    if (mode === 'assault') {
+      const o = this.playersBySmall[targetSm];
+      if (!o || o === p || !o.alive) return { ok: false, reason: 'Pick a nation to assault' };
+      if (p.isFriendly(o)) return { ok: false, reason: `You are allied with ${o.name}` };
+      target = targetSm;
+    }
+    for (const m of mechs) { m.mode = mode; m.orderTarget = target; m.reorderAt = 0; }
+    return { ok: true, count: mechs.length, mode, target };
+  },
+  // Where should a mech be standing right now, given its orders? Returns a tile or -1 to stay put.
+  mechOrderTile(m) {
+    const p = m.owner;
+    switch (m.mode) {
+      case 'roam': {
+        // walk the border, preferring the stretch nearest a hostile neighbour
+        if (!p.border.size) return -1;
+        let best = -1, bestScore = -Infinity;
+        let n = 0;
+        for (const t of p.border) {
+          if (n++ % Math.max(1, Math.floor(p.border.size / 60)) !== 0) continue;
+          const d = Math.hypot(this.x(t) - m.x, this.y(t) - m.y);
+          let threat = 0;
+          const c = this.neighbors4(t, this.nbufA);
+          for (let k = 0; k < c; k++) { const o = this.owner[this.nbufA[k]]; if (o && o !== p.smallID) { threat = 1; break; } }
+          // near > far, contested > quiet, plus a little noise so several mechs don't stack up
+          const score = threat * 60 - d + this.rng.int(0, 25);
+          if (score > bestScore) { bestScore = score; best = t; }
+        }
+        return best;
+      }
+      case 'defend': {
+        const live = p.incomingAttacks.filter((a) => !a.done && a.troops > 0);
+        if (!live.length) return -1;
+        // nearest first, then whoever is committing the most troops
+        let best = null, bestScore = -Infinity;
+        for (const a of live) {
+          if (a.markX < 0) continue;
+          const d = Math.hypot(a.markX - m.x, a.markY - m.y);
+          const score = Math.sqrt(a.troops) - d * 2;
+          if (score > bestScore) { bestScore = score; best = a; }
+        }
+        if (!best) return -1;
+        const t = this.ref(Math.round(within(best.markX, 0, this.width - 1)), Math.round(within(best.markY, 0, this.height - 1)));
+        return this.isLand(t) ? t : -1;
+      }
+      case 'assault': {
+        const o = this.playersBySmall[m.orderTarget];
+        if (!o || !o.alive || p.isFriendly(o)) { m.mode = 'roam'; return -1; }
+        // head for their nearest border tile, so the mech chews the edge rather than diving into the middle
+        let best = -1, bd = Infinity;
+        let n = 0;
+        for (const t of o.border) {
+          if (n++ % Math.max(1, Math.floor(o.border.size / 80)) !== 0) continue;
+          const d = (this.x(t) - m.x) ** 2 + (this.y(t) - m.y) ** 2;
+          if (d < bd) { bd = d; best = t; }
+        }
+        return best;
+      }
+      default: return -1;
+    }
   },
   mechCost(p) { const amph = R.mechAmphibious(p); return (t) => (this.isLand(t) ? (this.wallHp[t] && this.owner[t] !== p.smallID ? 3 : 1) : amph && this.isWater(t) ? 2.5 : 0); },
   mechPathTo(m, tile) {
@@ -67,6 +146,15 @@ module.exports = {
       if (m.hp <= 0) { m.done = true; this.events.push({ k: 'mechLost', p: p.smallID, x: m.x, y: m.y }); continue; }
       const here = this.tileAt(m.x, m.y);
       m.onWater = this.isWater(here);
+      // ---- standing orders: re-aim the patrol point periodically ----
+      if (m.mode !== 'hold' && this.tick >= m.reorderAt) {
+        m.reorderAt = this.tick + REORDER_INTERVAL + this.rng.int(0, 20);
+        const want = this.mechOrderTile(m);
+        if (want >= 0 && want !== m.patrol && this.pathBudget > 0) {
+          const far = Math.hypot(this.x(want) - m.x, this.y(want) - m.y) > cfg.mechPatrolRadius();
+          if (far) { this.pathBudget--; m.patrol = want; this.mechPathTo(m, want); }
+        }
+      }
       // ---- movement: to the patrol point, then circle it ----
       const speed = cfg.mechSpeed(p, m.onWater);
       if (m.pts.length && m.idx < m.pts.length - 1) this.advanceAlong(m, speed);

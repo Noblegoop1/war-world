@@ -120,6 +120,9 @@ a { color: #8ab4f8; }
 .cp-box.gold { color: var(--gold); }
 .cp-troops { position: relative; flex: 1; height: 28px; background: #12161b; border: 2px solid #f5c542; border-radius: 6px; overflow: hidden; }
 .cp-troops-fill { position: absolute; inset: 0; width: 0; background: linear-gradient(90deg, #2563eb, #3b82f6); transition: width 0.3s; }
+/* troops committed to attacks/boats/garrisons: still yours, just not at home */
+.cp-troops-out { position: absolute; top: 0; bottom: 0; width: 0; background: repeating-linear-gradient(115deg, rgba(147,197,253,0.85) 0 7px, rgba(191,219,254,0.85) 7px 14px); transition: width 0.3s, left 0.3s; }
+#cp-income.slowing { color: #f5c542; }
 .cp-troops span { position: relative; display: block; text-align: center; line-height: 24px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .cp-ratio { display: flex; align-items: center; gap: 10px; width: 100%; }
 .cp-ratio span { min-width: 120px; font-weight: 600; font-variant-numeric: tabular-nums; }

@@ -40,8 +40,16 @@ Open <http://localhost:3000>, pick a name, **Create game**, choose a map, **Star
     Trains spawn at factories and pay gold on arrival — 10K to your own station, 25K to another
     nation's, 35K to an ally's (the destination gets half). Upgrade to **level 2** to build Mechs;
     each further level makes Mechs tougher and longer-ranged.
-  * **Defense Post** — attackers within 30 tiles lose 5x troops and move 3x slower; shells enemy
-    ships within 75 tiles.
+  * **Defense Post** — attackers within 30 tiles lose 5x troops and move 3x slower, and your own
+    border tiles inside that radius are 1.5x harder again (the client draws them in pale stone so you
+    can see which stretch is fortified). A post within 6 tiles of open water also shells enemy ships,
+    but only for ~0.4% of a warship's health per shell — coastal guns harass ships, they don't sink
+    them. Coastal Defense Network raises that to 1.5%.
+  * **Artillery Battery** — a static gun with 45-tile reach. It shells enemy **Mechs** first (this is
+    the answer to a Mech parked on your border) and otherwise drops shells on the nearest attack
+    coming at you. It never takes ground.
+  * **Repair Yard** (needs Field Engineering) — heals your Mechs and rebuilds damaged wall tiles
+    within 40 tiles. Put it behind the front, not on it.
   * **Missile Silo** — launches atom / hydrogen bombs (90-tick reload) and, with the research,
     Bomber strikes.
   * **SAM Launcher** — shoots down incoming nukes within 70 tiles.
@@ -61,7 +69,14 @@ Open <http://localhost:3000>, pick a name, **Create game**, choose a map, **Star
   yours — send troops to claim it. Mechs are very tanky (40K HP at L2, +50% per level) but bleed
   HP while standing in enemy territory, faster where the enemy is strong or has a defense post.
   Nukes, other mechs and time inside enemy land kill them. Click a mech, then a tile, to re-route
-  it. AI nations deploy and re-position them against the nation they're fighting.
+  it. A mech also **anchors the ground around it**: attacks within 30 tiles lose 3x troops and crawl
+  at half speed, the same way a defense post works.
+  Right-click your own mech for its **standing orders**: *Hold* (circle the patrol point, what a click
+  sets), *Roam* (walk your border, favouring the stretch nearest a hostile neighbour), *Auto-defend*
+  (answer incoming attacks, nearest first then whoever is throwing the most troops) and *Auto-assault*
+  (pick a nation; the mech marches in and keeps wrecking whatever comes in range). AI nations pick the
+  same orders by situation: defend when they're being pushed, assault the nation they're fighting,
+  roam when there's no war.
 * **Warships** (key **0**) — need a Port. Click water to set the patrol area (100-tile patrol
   radius); they hunt enemy transport boats, trade ships and warships with shells, repair near your
   ports, and with Coastal Bombardment shell coastal land too. Click one, then water, to move it.
@@ -73,10 +88,15 @@ Open <http://localhost:3000>, pick a name, **Create game**, choose a map, **Star
   Complex, Defensive Position, Coastal Defense Network, Hardened Infrastructure, Military
   District, Fighter Networks, Heavy / Assault / Long-Range / Rapid-Fire Mech, Mech Production,
   Mech Weapons, Coastal Bombardment, Nuclear Subs, Amphibious Warfare, D-Day, Close Air Support,
-  Tactical Nukes, MIRV, Nuclear Deterrence) and some unlock units or change mechanics: **Submarine
+  Tactical Nukes, MIRV, Nuclear Deterrence, Field Engineering) and some unlock units or change
+  mechanics: **Field Engineering** (Repair Yard, plus better Artillery), **Submarine
   Warfare** (invisible subs firing missile volleys that bypass SAMs), **Naval Mines**, **Strategic
   Bombers** (click an enemy structure to bomb it), **Amphibious Mech**, **Naval Base**. AI nations
   pick by situation and *use* what they pick (war economy -> attack more, subs -> build subs, ...).
+* **Colonising** — empty landmasses are worth taking. AI nations run a periodic scan for unclaimed
+  regions and ship troops to the best one, scoring by size, distance and how isolated it is, so places
+  like Greenland and Antarctica get settled instead of sitting empty all game. The harder the AI, the
+  further it will sail for a free continent.
 * **Conquering** a nation or tribe pays gold: its treasury (all of an AI's, half of a human's) +
   10K + 15 per tile. Tribes start weak, grow a little, and stay weak.
 * **Expansion** uses OpenFront's frontier priority (terrain + already-owned neighbours + a little
@@ -91,6 +111,11 @@ Open <http://localhost:3000>, pick a name, **Create game**, choose a map, **Star
   an ally breaks the alliance.
 * **Win** by owning 80% of the land (configurable). Any player squeezed under 100 tiles is
   conquered outright — the attacker takes their land and gold.
+
+The **troop bar** shows your army, not just what's at home: the solid part is troops standing on your
+land, the striped part is what you've committed to attacks, boats and garrisons — still yours, still
+coming back. The rate above it turns **amber** when your cap is what's throttling growth rather than
+your land, so it's a cue to build Cities or take ground.
 
 **Keys:** `A` attack under cursor · `B` boat under cursor · `R` retaliate against your latest
 attacker · `C` centre on your territory · `1-6` structures, `7` lab, `8` wall, `9` mech, `0`
@@ -156,15 +181,15 @@ server/game/maps.js    Map catalog + loader (OpenFront .bin format) + procedural
 server/game/game.js    Simulation core: players, tiles, attacks (OpenFront frontier priority +
                        focus bias), alliances, stats, tick packets; mixes in the modules below
 server/game/units.js   Structures, 3-thick walls (planning, coast snapping, block-by-block build),
-                       defense posts, research labs / picker
+                       defense posts, artillery batteries, repair yards, research labs / picker
 server/game/rails.js   Factories, rail network (8-connected A*), trains and their gold
 server/game/mechs.js   Mechs: build from factories, patrol, cannon, stomp, territory damage
 server/game/navy.js    Boats, trade ships, shells, warships, submarines, naval mines
 server/game/nukes.js   Nukes on Bezier arcs, blast, SAMs, MIRV, deterrence, bombers
 server/game/research.js  The 30 doctrines and every multiplier they apply
 server/game/path.js    8-connected A* (octile), path resampling, Bezier helpers
-server/game/ai.js      Nation AI (research-driven; factories, mechs, navy, choke-point walls,
-                       nukes, bombers) and bot AI
+server/game/ai.js      Nation AI (research-driven; factories, mechs + standing orders, navy,
+                       colonising empty landmasses, choke-point walls, nukes, bombers) and bot AI
 public/                Client: menu/lobby UI, canvas renderer, radial menu, research picker, input
 public/assets/         OpenFront icons & sprites (CC BY-SA 4.0)
 server/maps/           Five bundled OpenFront maps (CC BY-SA 4.0)

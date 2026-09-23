@@ -67,6 +67,8 @@ const RESEARCH = [
     desc: 'Atom bombs cost 400K instead of 750K, silos reload twice as fast, but atom blasts are smaller (8/16).' },
   { id: 'mirv', name: 'MIRV Engineering', tags: ['nuke'], ai: { nukes: 1 },
     desc: 'Hydrogen bombs split into 5 atom-sized warheads scattered up to 45 tiles around the target.' },
+  { id: 'field_engineering', name: 'Field Engineering', tags: ['defense', 'mech'], ai: { defensive: 1, mechs: 1 },
+    desc: 'Unlocks the Repair Yard: it heals your Mechs and rebuilds damaged walls in range. Artillery Batteries also get +15 range, reload 30% faster and hit 50% harder.' },
   { id: 'nuclear_deterrence', name: 'Nuclear Deterrence', tags: ['nuke', 'defense'], ai: {},
     desc: 'If someone nukes you while you have a ready silo and 750K gold, an atom bomb automatically answers at their nearest silo (or city).' },
 ];
@@ -103,6 +105,12 @@ const effects = {
   siloCooldownMultiplier: (p) => (has(p, 'tactical_nukes') ? 0.5 : 1),
   samRangeBonus: (p) => (has(p, 'fighter_networks') ? 30 : 0),
   wallDamageMultiplier: (p) => (has(p, 'hardened_infra') ? 0.5 : 1),
+  // Fraction of a warship's health a defense post shell takes off. Deliberately tiny: posts drive ships
+  // off over time instead of deleting them. Coastal Defense Network is what makes them actually dangerous.
+  artilleryRangeBonus: (p) => (has(p, 'field_engineering') ? 15 : 0),
+  artilleryReloadMultiplier: (p) => (has(p, 'field_engineering') ? 0.7 : 1),
+  artilleryDamageMultiplier: (p) => (has(p, 'field_engineering') ? 1.5 : 1),
+  defensePostShipDamagePct: (p) => (has(p, 'coastal_defense') ? 0.015 : 0.004),
   defensePostShipRange: (p) => (has(p, 'coastal_defense') ? 150 : 75),
   defensePostShellRate: (p) => (has(p, 'coastal_defense') ? 50 : 100),
   // mechs

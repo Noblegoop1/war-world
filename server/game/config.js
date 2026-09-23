@@ -4,9 +4,9 @@
 
 const TerrainType = { WATER: 0, PLAINS: 1, HIGHLAND: 2, MOUNTAIN: 3 };
 const PlayerType = { HUMAN: 'human', NATION: 'nation', BOT: 'bot' };
-const UnitType = { CITY: 'city', PORT: 'port', DEFENSE_POST: 'defense', SILO: 'silo', SAM: 'sam', LAB: 'lab', FACTORY: 'factory', WALL: 'wall', MECH: 'mech', WARSHIP: 'warship', SUBMARINE: 'submarine', MINE: 'mine' };
+const UnitType = { CITY: 'city', PORT: 'port', DEFENSE_POST: 'defense', SILO: 'silo', SAM: 'sam', LAB: 'lab', FACTORY: 'factory', WALL: 'wall', MECH: 'mech', WARSHIP: 'warship', SUBMARINE: 'submarine', MINE: 'mine', ARTILLERY: 'artillery', REPAIR: 'repair' };
 // Fixed structures (live on a tile). Mobile units (mech/warship/submarine) are handled by their own systems.
-const STRUCTURE_TYPES = ['city', 'port', 'defense', 'silo', 'sam', 'lab', 'factory', 'mine'];
+const STRUCTURE_TYPES = ['city', 'port', 'defense', 'silo', 'sam', 'lab', 'factory', 'mine', 'artillery', 'repair'];
 const { effects: R } = require('./research');
 // Structures that count as "population" (a nation's civilian centers). Labs & walls can't be built near these.
 const POPULATION_TYPES = ['city'];
@@ -112,6 +112,13 @@ class Config {
   defensePostRange() { return 30; }
   defensePostDefenseBonus() { return 5; }
   defensePostSpeedBonus() { return 3; }
+  // Extra difficulty on the defender's own border tiles inside a post's range, on top of the radius
+  // bonus above. These are the tiles the client draws with the fortified border colour.
+  defensePostBorderBonus() { return 1.5; }
+  // A post only shells ships if it can see the sea. Anything further inland than this is a land fort.
+  defensePostCoastRange() { return 6; }
+  // Coastal guns harass ships, they don't sink them: a fraction of a warship's health per shell.
+  defensePostShipDamage(player) { return Math.floor(this.warshipHp() * R.defensePostShipDamagePct(player)); }
   samRange(player) { return 70 + R.samRangeBonus(player); }
   samCooldownTicks() { return 90; }
   siloCooldownTicks(player) { return Math.floor(90 * R.siloCooldownMultiplier(player)); }
@@ -139,6 +146,9 @@ class Config {
   defensePostShipRange(player) { return R.defensePostShipRange(player); }
   defensePostShellRate(player) { return R.defensePostShellRate(player); }
   // ---- rails / factories (OpenFront numbers) ----
+  // A station this close to another is still wired into the network, it just isn't worth
+  // laying a dedicated rail to; `trainStationMinRange` is only a *preference* for where trains go.
+  railMinRange() { return 2; }
   trainStationMinRange() { return 15; }
   trainStationMaxRange() { return 110; }
   railroadMaxSize() { return Math.floor(110 * 1.4142); }
@@ -166,6 +176,8 @@ class Config {
       case UnitType.SAM: return 300;
       case UnitType.LAB: return 100;
       case UnitType.MECH: return 80;
+      case UnitType.ARTILLERY: return 90;
+      case UnitType.REPAIR: return 70;
       default: return 0;
     }
   }
@@ -191,6 +203,8 @@ class Config {
       case UnitType.SUBMARINE: return Math.min(2500000, (numOwned + 1) * 625000) * d;
       // Mechs are national-scale assets: brutally expensive, escalating hard per mech owned.
       case UnitType.MECH: return (2000000 + numOwned * 2500000) * R.mechCostMultiplier(player) * d;
+      case UnitType.ARTILLERY: return Math.min(2500000, (numOwned + 1) * 400000) * d;
+      case UnitType.REPAIR: return Math.min(2000000, (numOwned + 1) * 500000) * d;
       default: return 0;
     }
   }
@@ -221,6 +235,22 @@ class Config {
   mechStompRadius(player) { return 3 + R.mechStompBonus(player); }
   mechTroopKillPerShell(player, factoryLevel = 2) { return Math.floor(6000 * (1 + 0.3 * (factoryLevel - 2)) * R.mechDamageMultiplier(player)); }
   mechPatrolRadius() { return 6; }
+  // ---- Artillery Battery: the static answer to a mech parked on your border ----
+  artilleryRange(player) { return 45 + R.artilleryRangeBonus(player); }
+  artilleryReload(player) { return Math.floor(40 * R.artilleryReloadMultiplier(player)); }
+  artilleryMechDamage(player) { return Math.floor(4500 * R.artilleryDamageMultiplier(player)); }
+  artilleryTroopKill(player) { return Math.floor(5000 * R.artilleryDamageMultiplier(player)); }
+  artilleryBlastRadius() { return 3; }
+  // ---- Repair Yard: keeps mechs and walls alive near the front ----
+  repairRange() { return 40; }
+  repairInterval() { return 20; }
+  repairMechPercent() { return 0.02; }   // of max HP, per interval, per mech in range
+  repairWallAmount() { return 2500; }    // HP per interval, spread over the damaged tiles it can reach
+  repairWallTilesPerPass() { return 12; }
+  // A mech anchors the ground around it, like a mobile defense post.
+  mechAuraRange() { return 30; }
+  mechDefenseBonus() { return 3; }
+  mechSpeedPenalty() { return 2; }
   nukeCost(type, player) {
     if (player && player.type === PlayerType.HUMAN && this.infiniteGold()) return 0;
     return type === NukeType.HYDROGEN ? 5000000 : R.atomCost(player);
@@ -287,7 +317,12 @@ class Config {
   attackLogic(input) {
     const { attackTroops, attacker, defender } = input;
     let { mag, tileCost } = terrainAttackBase(input.terrain);
-    if (defender !== null && input.defenderHasDefensePost) { mag *= this.defensePostDefenseBonus(); tileCost *= this.defensePostSpeedBonus(); }
+    if (defender !== null && input.defenderHasDefensePost) {
+      mag *= this.defensePostDefenseBonus(); tileCost *= this.defensePostSpeedBonus();
+      if (input.isDefenderBorder) { mag *= this.defensePostBorderBonus(); tileCost *= this.defensePostBorderBonus(); }
+    }
+    // A mech nearby digs in the ground it stands on, the same way a defense post does.
+    if (defender !== null && input.defenderHasMech) { mag *= this.mechDefenseBonus(); tileCost *= this.mechSpeedPenalty(); }
     if (input.falloutRatio !== null) { const f = this.falloutDefenseModifier(input.falloutRatio); mag *= f; tileCost *= f; }
     if (defender === null) {
       const tickBudget = input.borderSize * 2;

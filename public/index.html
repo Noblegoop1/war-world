@@ -36,6 +36,9 @@
         <li><b>Factories</b> <kbd>3</kbd> lay rail to every City/Port/Lab/Factory within 110 tiles and run trains that pay gold on arrival (more when the destination belongs to another nation). Upgrade a factory to <b>level 2</b> to build Mechs; higher levels give tougher, longer-ranged Mechs.</li>
         <li><b>Walls</b> <kbd>8</kbd>: click-and-drag on your land to draw a 3-tile-thick wall. It snaps to the coast and is built block by block (the slowest build). Enemies must grind it down and can't pass behind it. Price climbs steeply; nukes and mechs raze it.</li>
         <li><b>Mechs</b> <kbd>9</kbd>: from a level-2 Factory. Click where it should patrol: it walks there and circles, shelling structures, mechs and land in range and stomping the ground &mdash; hit land turns <i>neutral</i>. Slow, land-locked and very tanky, but it bleeds HP inside enemy land. Click it, then a tile, to move it.</li>
+        <li><b>Artillery Battery</b> &amp; <b>Repair Yard</b>: a battery shells enemy Mechs and incoming attacks from 45 tiles away &mdash; it is the answer to a Mech on your border. A Repair Yard (needs the Field Engineering doctrine) heals your Mechs and rebuilds damaged walls nearby.</li>
+        <li><b>Mech orders</b>: right-click your own Mech for Hold / Roam border / Auto-defend / Auto-assault. A Mech also holds ground &mdash; attacks within 30 tiles lose 3x troops and move at half speed.</li>
+        <li><b>Defense Posts</b> fortify the border stretch inside their radius (drawn in pale stone) and, if they are near the coast, shell passing enemy ships.</li>
         <li><b>Warships</b> <kbd>0</kbd>: need a Port. Click water to set a patrol area; they hunt boats, trade ships and warships with shells. Click one, then water, to move it.</li>
         <li><b>Research Lab</b> <kbd>7</kbd>: needs 3 Cities and a Factory within rail range. Pick 1 of 3 random doctrines (Mech, Navy, Air, Defense, Economy, Nuclear&hellip;). Some unlock units &mdash; submarines, naval mines, bomber strikes &mdash; which appear on the bar. Max 2 per game, 60s each.</li>
         <li><b>Conquering</b> a nation or tribe pays gold based on its size and treasury.</li>
@@ -146,7 +149,8 @@
   <div id="control-panel" class="hud">
     <div class="cp-row">
       <div class="cp-box" id="cp-income" title="Troop income per second">+0/s</div>
-      <div class="cp-troops" id="cp-troops" title="Troops / max troops"><div class="cp-troops-fill" id="cp-troops-fill"></div><span id="cp-troops-text">0 / 0</span></div>
+      <div class="cp-troops" id="cp-troops" title="Troops / max troops"><div class="cp-troops-fill" id="cp-troops-fill"></div>
+        <div class="cp-troops-out" id="cp-troops-out"></div><span id="cp-troops-text">0 / 0</span></div>
       <div class="cp-box gold" id="cp-gold" title="Gold">0</div>
     </div>
     <div class="cp-row">

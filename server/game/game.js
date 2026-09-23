@@ -126,6 +126,14 @@ class Player {
 // +-FOCUS_PULL, which is +-20% on an ordinary tile's priority; a focus closer than
 // FOCUS_MIN_DISTANCE tiles to the attack's origin is ignored as noise.
 const FOCUS_PULL = 0.4;
+// Unclaimed-landmass scan (see neutralRegions): how often to redo it, and the smallest patch worth a boat.
+const REGION_SCAN_INTERVAL = 300;
+const MIN_REGION_SIZE = 60;
+// Attack marker (the crossed swords + troop count). We keep the last FRONT_SAMPLE conquests and put the
+// marker on whichever of them sits nearest their centre, so it always lands on ground the attack is
+// actually taking. A plain average drifts into the middle of the defender when a front wraps around them.
+const FRONT_SAMPLE = 48;
+const FRONT_SMOOTHING = 0.3;
 const FOCUS_MIN_DISTANCE = 8;
 
 class Attack {
@@ -145,8 +153,11 @@ class Attack {
     this.originX = 0; this.originY = 0;
     this.focus = -1;
     this.fdx = 0; this.fdy = 0; // unit vector origin -> focus, 0,0 when there is no focus
-    this.frontX = 0; this.frontY = 0; // running centroid of the conquering front (for the UI marker)
+    this.frontX = 0; this.frontY = 0; // running centroid of this tick's conquests
     this.frontN = 0;
+    this.recent = new Int32Array(FRONT_SAMPLE).fill(-1); // ring of the last conquests
+    this.recentI = 0;
+    this.markX = -1; this.markY = -1;  // smoothed marker position, always on a tile we actually took
   }
   // Cache the pull direction; recomputed whenever the focus or the origin changes.
   setFocusTile(g, tile) {
@@ -214,6 +225,7 @@ class Game {
   y(i) { return (i / this.width) | 0; }
   ref(x, y) { return y * this.width + x; }
   valid(x, y) { return x >= 0 && y >= 0 && x < this.width && y < this.height; }
+  get nbufA() { return this._nbufA || (this._nbufA = [0, 0, 0, 0]); }
   isLand(i) { const t = this.terrain[i]; return (t & IS_LAND) !== 0 && (t & MAG_MASK) !== IMPASSABLE; }
   isWater(i) { return (this.terrain[i] & IS_LAND) === 0; }
   isOcean(i) { return (this.terrain[i] & (IS_LAND | OCEAN)) === OCEAN; }
@@ -454,6 +466,8 @@ class Game {
     this.tickBombers();
     this.tickResearch();
     this.tickDefensePosts();
+    this.tickArtillery();
+    this.tickRepairYards();
     this.expireAllianceRequests();
     for (const p of this.players) if (p.ai && p.alive) p.ai.tick();
     this.checkDeaths();
@@ -593,6 +607,58 @@ class Game {
       a.heap.push(nb, (a.rng.int(0, 7) + 10) * (1 - numOwnedByMe * 0.5 + mag / 2) + this.tick);
     }
   }
+  // Unclaimed landmasses, as connected components of neutral land. Nations use this to decide where to
+  // colonise — an empty continent like Greenland or Antarctica is worth a boat even when it is far away,
+  // and an island nobody borders is worth more than the same area wedged between two empires.
+  // One shared scan for every AI, refreshed every REGION_SCAN_INTERVAL ticks.
+  neutralRegions() {
+    if (this.regionsCache && this.tick - this.regionsTick < REGION_SCAN_INTERVAL) return this.regionsCache;
+    this.regionsTick = this.tick;
+    const W = this.width, H = this.height, n = W * H;
+    if (!this.regionSeen || this.regionSeen.length !== n) this.regionSeen = new Uint8Array(n);
+    const seen = this.regionSeen;
+    seen.fill(0);
+    const regions = [];
+    const queue = new Int32Array(n);
+    const b = [0, 0, 0, 0];
+    for (let start = 0; start < n; start++) {
+      if (seen[start] || !this.isLand(start) || this.owner[start] !== 0) continue;
+      let head = 0, tail = 0;
+      queue[tail++] = start; seen[start] = 1;
+      let size = 0, sx = 0, sy = 0, hostile = 0, edge = 0;
+      const shores = [];
+      while (head < tail) {
+        const t = queue[head++];
+        size++; sx += t % W; sy += (t / W) | 0;
+        if (this.isOceanShore(t) && shores.length < 64 && (size & 7) === 1) shores.push(t);
+        const m = this.neighbors4(t, b);
+        if (m < 4) edge++;
+        for (let k = 0; k < m; k++) {
+          const nb = b[k];
+          if (seen[nb]) continue;
+          if (!this.isLand(nb)) { edge++; continue; }
+          if (this.owner[nb] !== 0) { hostile++; continue; } // touches somebody's territory
+          seen[nb] = 1; queue[tail++] = nb;
+        }
+      }
+      if (size < MIN_REGION_SIZE || !shores.length) continue;
+      regions.push({ size, cx: sx / size, cy: sy / size, shores, hostile, edge });
+    }
+    regions.sort((a, b2) => b2.size - a.size);
+    this.regionsCache = regions.slice(0, 24);
+    return this.regionsCache;
+  }
+  // A mech holds ground like a defense post: attacks near one bleed harder and crawl.
+  hasMechNearby(owner, tile) {
+    if (!owner.mechs.length) return false;
+    const r = this.config.mechAuraRange(), x = this.x(tile), y = this.y(tile);
+    for (const m of owner.mechs) {
+      if (m.done) continue;
+      if (Math.abs(m.x - x) > r || Math.abs(m.y - y) > r) continue;
+      if ((m.x - x) ** 2 + (m.y - y) ** 2 <= r * r) return true;
+    }
+    return false;
+  }
   hasDefensePostNearby(owner, tile) {
     const r = this.config.defensePostRange();
     for (const u of owner.units) {
@@ -618,7 +684,6 @@ class Game {
       const borderSize = a.border.size + a.rng.int(0, 5);
       let tickBudget = 1;
       let troops = a.troops;
-      a.frontX = 0; a.frontY = 0; a.frontN = 0;
       const speedMult = R.attackSpeedMultiplier(attacker);
       const lossMult = R.attackerLossMultiplier(attacker, !!target);
       while (tickBudget > 0) {
@@ -644,7 +709,7 @@ class Game {
           tickBudget -= 0.5;
           if (this.wallHp[tile] <= 0) { this.clearWallTile(tile); a.heap.push(tile, this.tick); a.border.add(tile); }
           else { a.heap.push(tile, this.tick + 3); a.border.add(tile); }
-          a.frontX += this.x(tile); a.frontY += this.y(tile); a.frontN++;
+          a.recent[a.recentI++ % FRONT_SAMPLE] = tile;
           continue;
         }
         this.attackAddNeighbors(a, tile);
@@ -654,6 +719,8 @@ class Game {
           attacker: { type: attacker.type, numTiles: attacker.numTiles },
           defender: target ? { type: target.type, numTiles: target.numTiles, troops: target.troops, isTraitor: target.isTraitor() } : null,
           defenderHasDefensePost: target ? this.hasDefensePostNearby(target, tile) : false,
+          isDefenderBorder: target ? target.border.has(tile) : false,
+          defenderHasMech: target ? this.hasMechNearby(target, tile) : false,
           falloutRatio: this.fallout[tile] ? this.numFallout / this.numLand : null,
           borderSize,
           attackSpeedMult: speedMult,
@@ -670,10 +737,11 @@ class Game {
           a.troops = troops;
         }
         this.conquer(attacker, tile);
-        a.frontX += this.x(tile); a.frontY += this.y(tile); a.frontN++;
+        a.recent[a.recentI++ % FRONT_SAMPLE] = tile;
         if (target) { this.handleDeadDefender(attacker, target); if (!target.alive) break; }
       }
       a.troops = Math.max(0, troops);
+      this.updateAttackMarker(a);
     }
     if (this.attacks.some((a) => a.done)) {
       this.attacks = this.attacks.filter((a) => !a.done);
@@ -682,6 +750,30 @@ class Game {
         p.incomingAttacks = p.incomingAttacks.filter((a) => !a.done);
       }
     }
+  }
+  // Put the marker on the tile nearest the centre of our recent conquests, then ease towards it. The
+  // snap is what keeps it on the front line; the easing is what stops it teleporting between fronts.
+  updateAttackMarker(a) {
+    let n = 0, sx = 0, sy = 0;
+    for (let i = 0; i < FRONT_SAMPLE; i++) {
+      const t = a.recent[i];
+      if (t < 0) continue;
+      sx += this.x(t); sy += this.y(t); n++;
+    }
+    if (!n) return;
+    const mx = sx / n, my = sy / n;
+    let bestX = -1, bestY = -1, bd = Infinity;
+    for (let i = 0; i < FRONT_SAMPLE; i++) {
+      const t = a.recent[i];
+      if (t < 0) continue;
+      const x = this.x(t), y = this.y(t);
+      const d = (x - mx) ** 2 + (y - my) ** 2;
+      if (d < bd) { bd = d; bestX = x; bestY = y; }
+    }
+    if (bestX < 0) return;
+    if (a.markX < 0) { a.markX = bestX; a.markY = bestY; return; }
+    a.markX += (bestX - a.markX) * FRONT_SMOOTHING;
+    a.markY += (bestY - a.markY) * FRONT_SMOOTHING;
   }
   handleDeadDefender(attacker, target) {
     if (target.tiles.size === 0 || target.tiles.size >= this.config.conquerThresholdTiles()) return;
@@ -792,15 +884,24 @@ class Game {
       [[...p.researches], p.research ? [p.research.id, Math.max(0, p.research.doneTick - this.tick)] : null, p.type === PlayerType.HUMAN && p.pendingChoices ? p.pendingChoices.choices : null],
       this.attackPower(p), this.economyPower(p), p.numWallTiles, p.mechs.length,
       p.warships.filter((w) => !w.done).length, p.subs.filter((s) => !s.done).length,
+      Math.floor(this.troopsDeployed(p)),
     ]);
+  }
+  // Troops that have left home but still belong to this player: attacks in progress, boats in transit and
+  // garrisons sitting in defense posts. The client shows these as the lighter part of the troop bar.
+  troopsDeployed(p) {
+    let n = 0;
+    for (const a of p.outgoingAttacks) if (!a.done) n += a.troops;
+    for (const b of p.boats) if (!b.done) n += b.troops;
+    for (const u of p.units) n += u.garrison || 0;
+    return n;
   }
   unitsPacket() { return this.units.map((u) => [u.id, u.type, u.owner.smallID, u.tile, u.level, u.constructionLeft, u.cooldown, u.garrison || 0, u.station ? 1 : 0]); }
   attacksPacket() {
-    return this.attacks.filter((a) => !a.done).map((a) => {
-      const fx = a.frontN ? a.frontX / a.frontN : (a.lastFrontX ?? -1), fy = a.frontN ? a.frontY / a.frontN : (a.lastFrontY ?? -1);
-      if (a.frontN) { a.lastFrontX = fx; a.lastFrontY = fy; }
-      return [a.id, a.attacker.smallID, a.target ? a.target.smallID : 0, Math.floor(a.troops), a.sourceTile ?? -1, Math.round(fx), Math.round(fy)];
-    });
+    return this.attacks.filter((a) => !a.done).map((a) => [
+      a.id, a.attacker.smallID, a.target ? a.target.smallID : 0, Math.floor(a.troops), a.sourceTile ?? -1,
+      this.r1(a.markX), this.r1(a.markY),
+    ]);
   }
   r1(v) { return Math.round(v * 10) / 10; }
   boatsPacket() { return this.boats.filter((b) => !b.done).map((b) => [b.id, b.owner.smallID, this.r1(b.x), this.r1(b.y), Math.floor(b.troops), b.target ? b.target.smallID : 0]); }
@@ -816,7 +917,7 @@ class Game {
     }
     return out;
   }
-  mechsPacket() { return this.mechs.filter((m) => !m.done).map((m) => [m.id, m.owner.smallID, this.r1(m.x), this.r1(m.y), Math.round(m.hp), Math.round(m.maxHp), m.engaged ? 1 : 0, m.level, m.patrol, Math.max(0, m.cannonReady - this.tick), m.range]); }
+  mechsPacket() { return this.mechs.filter((m) => !m.done).map((m) => [m.id, m.owner.smallID, this.r1(m.x), this.r1(m.y), Math.round(m.hp), Math.round(m.maxHp), m.engaged ? 1 : 0, m.level, m.patrol, Math.max(0, m.cannonReady - this.tick), m.range, m.mode, m.orderTarget]); }
   shellsPacket() { return this.shells.map((s) => [s.id, s.owner.smallID, this.r1(s.x), this.r1(s.y), this.r1(s.tx), this.r1(s.ty), s.kind]); }
   trainsPacket() { return this.trains.filter((t) => !t.done).map((t) => [t.id, t.owner.smallID, this.r1(t.x), this.r1(t.y), t.cars.map((c) => [this.r1(c.x), this.r1(c.y)])]); }
   railsPacket() { return this.rails.map((r) => [r.id, r.a.id, r.b.id, r.tiles]); }
@@ -835,7 +936,9 @@ class Game {
     }
     const pkt = { t: 'tick', tick: this.tick, phase: this.phase, tiles };
     if (this.events.length) { pkt.events = this.events; this.events = []; }
-    if (this.tick % 5 === 0 || this.phase === 'over') { pkt.stats = this.statsPacket(); pkt.attacks = this.attacksPacket(); }
+    if (this.tick % 5 === 0 || this.phase === 'over') pkt.stats = this.statsPacket();
+    if (this.attacks.length) pkt.attacks = this.attacksPacket();   // every tick: the marker has to glide
+    else if (this.tick % 5 === 0) pkt.attacks = [];
     const mobile = this.boats.length || this.nukes.length || this.tradeShips.length || this.warships.length || this.subs.length || this.shells.length || this.trains.length || this.bombers.length;
     if (mobile || this.tick % 5 === 0) {
       pkt.boats = this.boatsPacket(); pkt.nukes = this.nukesPacket(); pkt.trade = this.tradePacket();

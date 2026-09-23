@@ -15,29 +15,35 @@ module.exports = {
   railCost(t) { if (!this.isLand(t)) return this.isWater(t) ? 6 : 0; return this.wallHp[t] ? 0 : 1; },
   railNeighbors(u) { return this.railAdj.get(u.id) || new Set(); },
   isStationType(u) { return STATION_TYPES.includes(u.type); },
-  // Called when a structure finishes building: factories create stations around them; others join a nearby factory's network.
+  // Called when a structure finishes building. A Factory is a station and drags every City/Port/Lab/
+  // Factory in range into the network; anything else joins an existing network if a Factory reaches it.
+  // Distance only has to clear `railMinRange` (a couple of tiles) — a City built right next to its
+  // Factory still gets track. `trainStationMinRange` is not a connection rule, it only biases where
+  // trains choose to go, so a tight cluster of buildings is wired up instead of being left orphaned.
   railConnect(u) {
     if (!this.isStationType(u) || u.station) return;
     const range = this.config.trainStationMaxRange();
+    const min = this.config.railMinRange();
+    const inRange = (o) => { const d = this.dist(o.tile, u.tile); return d <= range && d >= min; };
+    const makeStation = (o) => { if (!o.station) { o.station = true; this.railAdj.set(o.id, new Set()); } };
     if (u.type === UnitType.FACTORY) {
-      u.station = true; this.railAdj.set(u.id, new Set());
-      const near = this.units.filter((o) => o !== u && this.isStationType(o) && o.constructionLeft === 0 && this.dist(o.tile, u.tile) <= range && this.dist(o.tile, u.tile) >= this.config.trainStationMinRange());
+      makeStation(u);
+      const near = this.units.filter((o) => o !== u && this.isStationType(o) && o.constructionLeft === 0 && inRange(o));
       near.sort((a, b) => this.dist(a.tile, u.tile) - this.dist(b.tile, u.tile));
       // link the nearest two now, queue the rest (A* is spread over later ticks)
-      near.slice(0, 6).forEach((o, i) => { if (!o.station) { o.station = true; this.railAdj.set(o.id, new Set()); } if (i < 2) this.layRail(u, o); else (this.railQueue ||= []).push([u, o]); });
+      near.slice(0, 8).forEach((o, i) => { makeStation(o); if (i < 2) this.layRail(u, o); else (this.railQueue ||= []).push([u, o]); });
       this.unitsChanged = true; this.railsChanged = true;
       return;
     }
-    // non-factory: only joins if a factory (station) is in range
-    const factories = this.units.filter((o) => o.type === UnitType.FACTORY && o.station && this.dist(o.tile, u.tile) <= range && this.dist(o.tile, u.tile) >= this.config.trainStationMinRange());
+    // Not a factory: join the nearest factories in range, then mesh with a couple of their stations.
+    const factories = this.units.filter((o) => o.type === UnitType.FACTORY && o.station && inRange(o));
     if (!factories.length) return;
-    u.station = true; this.railAdj.set(u.id, new Set());
+    makeStation(u);
     factories.sort((a, b) => this.dist(a.tile, u.tile) - this.dist(b.tile, u.tile));
-    for (const f of factories.slice(0, 2)) this.layRail(u, f);
-    // also hook onto up to 2 other nearby stations for a mesh
-    const others = this.units.filter((o) => o !== u && o.station && o.type !== UnitType.FACTORY && this.dist(o.tile, u.tile) <= range * 0.6 && this.dist(o.tile, u.tile) >= this.config.trainStationMinRange());
+    factories.slice(0, 2).forEach((f, i) => { if (i === 0) this.layRail(u, f); else (this.railQueue ||= []).push([u, f]); });
+    const others = this.units.filter((o) => o !== u && o.station && o.type !== UnitType.FACTORY && inRange(o) && this.dist(o.tile, u.tile) <= range * 0.6);
     others.sort((a, b) => this.dist(a.tile, u.tile) - this.dist(b.tile, u.tile));
-    for (const o of others.slice(0, 2)) this.layRail(u, o);
+    for (const o of others.slice(0, 2)) (this.railQueue ||= []).push([u, o]);
     this.unitsChanged = true; this.railsChanged = true;
   },
   layRail(a, b) {
@@ -109,8 +115,11 @@ module.exports = {
           if (this.railNeighbors(f).size === 0) continue;
           // chance per 5 ticks scaled so the expected interval matches `rate` ticks per level
           if (this.rng.next() >= (5 * f.level) / rate) continue;
-          const cluster = this.railCluster(f).filter((s) => s !== f);
-          if (!cluster.length) continue;
+          const all = this.railCluster(f).filter((s) => s !== f);
+          if (!all.length) continue;
+          // prefer somewhere actually worth the trip; a tight cluster still runs short shuttles
+          const far = all.filter((s) => this.dist(s.tile, f.tile) >= cfg.trainStationMinRange());
+          const cluster = far.length ? far : all;
           const foreign = cluster.filter((s) => s.owner !== p && !s.owner.incomingAttacks.some((a) => a.attacker === p) && !p.incomingAttacks.some((a) => a.attacker === s.owner));
           const pool = foreign.length && this.rng.chance(3) === false ? foreign : cluster;
           const dst = pool[this.rng.int(0, pool.length - 1)];

@@ -54,6 +54,7 @@ module.exports = {
     if (this.wallHp[tile]) return { ok: false, reason: 'A wall is in the way' };
     if (type === UnitType.PORT && !this.isOceanShore(tile)) return { ok: false, reason: 'Ports must be built on the sea coast' };
     if (this.settings.disableNukes && (type === UnitType.SILO || type === UnitType.SAM)) return { ok: false, reason: 'Nukes are disabled' };
+    if (type === UnitType.REPAIR && !p.researches.has('field_engineering')) return { ok: false, reason: 'Needs the Field Engineering research' };
     if (type === UnitType.LAB) {
       if (this.populationCount(p) < this.config.populationRequiredForLab()) return { ok: false, reason: `Research Labs need ${this.config.populationRequiredForLab()} Cities first` };
       if (this.hasPopulationNear(tile, this.config.labMinGapFromPopulation())) return { ok: false, reason: 'Labs must be away from your Cities' };
@@ -101,6 +102,91 @@ module.exports = {
     this.unitsChanged = true;
     return { ok: true, added: n };
   },
+  // Only a post that can see open water shoots at ships. Cached: neither the coast nor the post moves.
+  isCoastalPost(u) {
+    if (u.coastal !== undefined) return u.coastal;
+    const r = this.config.defensePostCoastRange(), x = this.x(u.tile), y = this.y(u.tile);
+    u.coastal = false;
+    for (let dy = -r; dy <= r && !u.coastal; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        const nx = x + dx, ny = y + dy;
+        if (!this.valid(nx, ny) || dx * dx + dy * dy > r * r) continue;
+        if (this.isOcean(this.ref(nx, ny))) { u.coastal = true; break; }
+      }
+    }
+    return u.coastal;
+  },
+  // Artillery Battery: a static gun that answers what troops cannot — enemy mechs sitting on your
+  // border — and drops shells on whichever attack front is closest. Slow reload, big hit.
+  tickArtillery() {
+    if (this.tick % 5 !== 0) return;
+    for (const p of this.players) {
+      if (!p.alive) continue;
+      const guns = p.completedUnitsOf(UnitType.ARTILLERY);
+      if (!guns.length) continue;
+      const range = this.config.artilleryRange(p), reload = this.config.artilleryReload(p);
+      for (const u of guns) {
+        if (u.shellReady > this.tick) continue;
+        const gx = this.x(u.tile) + 0.5, gy = this.y(u.tile) + 0.5;
+        // hostile mechs first: this is the unit's whole reason to exist
+        let target = null, bd = range * range;
+        for (const m of this.mechs) {
+          if (m.done || !this.hostile(p, m.owner)) continue;
+          const d = (m.x - gx) ** 2 + (m.y - gy) ** 2;
+          if (d < bd) { bd = d; target = { x: m.x, y: m.y, mech: true }; }
+        }
+        if (!target) {
+          // otherwise shell the nearest attack coming at us
+          for (const a of p.incomingAttacks) {
+            if (a.done || a.markX < 0) continue;
+            const d = (a.markX - gx) ** 2 + (a.markY - gy) ** 2;
+            if (d < bd) { bd = d; target = { x: a.markX, y: a.markY, mech: false }; }
+          }
+        }
+        if (!target) continue;
+        this.fireShell(p, u.tile, null, 'artillery', {
+          tx: target.x, ty: target.y, speed: 2.5, life: 120,
+          dmg: this.config.artilleryMechDamage(p),
+          troopKill: this.config.artilleryTroopKill(p),
+          radius: this.config.artilleryBlastRadius(),
+        });
+        u.shellReady = this.tick + reload;
+      }
+    }
+  },
+  // Repair Yard: patches up mechs and walls in range. Needs Field Engineering.
+  tickRepairYards() {
+    const every = this.config.repairInterval();
+    if (this.tick % every !== 0) return;
+    for (const p of this.players) {
+      if (!p.alive) continue;
+      const yards = p.completedUnitsOf(UnitType.REPAIR);
+      if (!yards.length) continue;
+      const range = this.config.repairRange();
+      for (const u of yards) {
+        const ux = this.x(u.tile), uy = this.y(u.tile);
+        for (const m of p.mechs) {
+          if (m.done || m.hp >= m.maxHp) continue;
+          if ((m.x - ux) ** 2 + (m.y - uy) ** 2 > range * range) continue;
+          m.hp = Math.min(m.maxHp, m.hp + m.maxHp * this.config.repairMechPercent());
+        }
+        if (!p.numWallTiles) continue;
+        // walk a ring of the owner's damaged wall tiles and top them up
+        const maxHp = this.config.wallMaxHp();
+        let budget = this.config.repairWallTilesPerPass(), per = this.config.repairWallAmount();
+        for (let dy = -range; dy <= range && budget > 0; dy += 2) {
+          for (let dx = -range; dx <= range && budget > 0; dx += 2) {
+            const x = ux + dx, y = uy + dy;
+            if (!this.valid(x, y) || dx * dx + dy * dy > range * range) continue;
+            const t = this.ref(x, y);
+            if (!this.wallHp[t] || this.wallHp[t] >= maxHp || this.owner[t] !== p.smallID) continue;
+            this.wallHp[t] = Math.min(maxHp, this.wallHp[t] + per);
+            budget--;
+          }
+        }
+      }
+    }
+  },
   // Defense posts: shell enemy ships within range (OpenFront) and, with Defensive Position, hit land attackers.
   tickDefensePosts() {
     if (this.tick % 5 !== 0) return;
@@ -109,10 +195,12 @@ module.exports = {
       const posts = p.completedUnitsOf(UnitType.DEFENSE_POST);
       if (!posts.length) continue;
       const shipRange = this.config.defensePostShipRange(p), rate = this.config.defensePostShellRate(p);
+      const dmg = this.config.defensePostShipDamage(p);
       for (const u of posts) {
         if (u.shellReady > this.tick) continue;
+        if (!this.isCoastalPost(u)) continue;   // inland forts have no line on the sea
         const target = this.nearestEnemyShip(p, this.x(u.tile) + 0.5, this.y(u.tile) + 0.5, shipRange, true);
-        if (target) { this.fireShell(p, u.tile, target, 'post'); u.shellReady = this.tick + rate; }
+        if (target) { this.fireShell(p, u.tile, target, 'post', { dmg }); u.shellReady = this.tick + rate; }
       }
       if (p.researches.has('defensive_position') && p.incomingAttacks.length && this.tick % 10 === 0) {
         const r = this.config.defensePostRange();

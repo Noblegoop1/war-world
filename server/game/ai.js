@@ -7,6 +7,12 @@ const { Rng } = require('./rng');
 const { PlayerType, UnitType, NukeType, Difficulty, RESEARCH_BY_ID } = require('./config');
 const R = require('./research').effects;
 
+// Colonising empty landmasses (see maybeColonise).
+const COLONISE_COOLDOWN = 200;             // ticks between attempts
+const COLONISE_MIN_TROOP_RATIO = 0.35;     // don't ship out unless reasonably stocked
+const COLONISE_ISOLATION_BONUS = 1.5;      // how much an untouched island beats contested ground
+const COLONISE_SCORE_THRESHOLD = [900, 500, 250, 120]; // easy -> impossible
+
 class NationAI {
   constructor(game, player, seed) {
     this.game = game;
@@ -33,6 +39,7 @@ class NationAI {
     this.nukeBias = 1;
     this.lastWallTick = -10000;
     this.currentEnemy = null;
+    this.coloniseAfter = this.rng.int(0, COLONISE_COOLDOWN);
   }
 
   get difficulty() { return this.cfg.difficulty(); }
@@ -121,6 +128,8 @@ class NationAI {
     const friends = neighbors.filter((o) => p.isFriendly(o));
     const enemies = neighbors.filter((o) => !p.isFriendly(o));
     if (touchesNeutral && this.sendAttack(null)) return;
+    // Nothing left to walk into: look for an empty landmass worth shipping troops to.
+    if (this.maybeColonise()) return;
     if (enemies.length === 0) {
       if (this.rng.chance(5)) this.attackWithRandomBoat();
     } else {
@@ -223,6 +232,46 @@ class NationAI {
     const g = this.game, out = [];
     for (const t of player.border) { if (ocean ? g.isOceanShore(t) : g.isShore(t)) { out.push(t); if (out.length >= limit) break; } }
     return out;
+  }
+  // Ship troops to the best unclaimed landmass. This is what stops empty ground like Greenland or
+  // Antarctica sitting untouched all game: those score highly because they are big and nobody borders
+  // them, which also makes them the safest ground to own.
+  maybeColonise() {
+    const g = this.game, p = this.p;
+    if (g.settings.disableBoats || !p.alive) return false;
+    if (this.game.tick < this.coloniseAfter) return false;
+    if (p.boats.filter((b) => !b.done).length >= this.cfg.boatMaxNumber(p)) return false;
+    // don't ship troops out while we are being overrun
+    const underAttack = p.incomingAttacks.reduce((sum, a) => sum + (a.done ? 0 : a.troops), 0);
+    if (underAttack > p.troops * 0.4) return false;
+    if (p.troops < this.cfg.maxTroops(p) * COLONISE_MIN_TROOP_RATIO) return false;
+    if (!this.shoreTiles(p, 1, true).length) return false;
+    const regions = g.neutralRegions();
+    if (!regions.length) return false;
+    const c = g.centroid(p);
+    if (!c) return false;
+    let best = null, bestScore = 0, bestShore = null;
+    for (const r of regions) {
+      // nearest landing site, so distance reflects the actual trip rather than the region's middle
+      let shore = null, sd = Infinity;
+      for (const t of r.shores) { const d = g.dist(t, g.ref(Math.round(c.x), Math.round(c.y))); if (d < sd) { sd = d; shore = t; } }
+      if (shore === null) continue;
+      // Big is good, close is good, and land nobody else touches is worth a premium: it is defensible
+      // and we get to take all of it. `hostile` counts tiles of the region that border someone.
+      const isolation = 1 - Math.min(1, r.hostile / Math.max(1, r.edge + r.hostile));
+      const score = (r.size * (1 + COLONISE_ISOLATION_BONUS * isolation)) / (1 + sd / 60);
+      if (score > bestScore) { bestScore = score; best = r; bestShore = shore; }
+    }
+    if (!best) return false;
+    // Weaker AIs only bother with what is close; the good ones will cross an ocean for a free continent.
+    if (bestScore < COLONISE_SCORE_THRESHOLD[this.diffIndex]) return false;
+    if (g.pathBudget-- <= 0) return false;
+    const troops = this.calculateAttackTroops(null, true);
+    if (troops === null) return false;
+    const sent = g.sendBoat(p, bestShore, troops) !== null;
+    // back off either way: a failed route usually means no sea path, and retrying every tick is waste
+    this.coloniseAfter = g.tick + (sent ? COLONISE_COOLDOWN : COLONISE_COOLDOWN * 3);
+    return sent;
   }
   attackWithRandomBoat(enemies = []) {
     const g = this.game, p = this.p;
@@ -382,6 +431,27 @@ class NationAI {
         if (!g.valid(x, y)) continue;
         const t = g.ref(x, y);
         if (g.isOcean(t) && g.build(p, UnitType.MINE, t).ok) return true;
+      }
+    }
+    // Artillery Battery: the answer to enemy mechs sitting on our border, and to a grinding front.
+    // Built reactively - we only pay for one once something is actually pressing on us.
+    const guns = p.unitsOf(UnitType.ARTILLERY).length;
+    const mechThreat = g.mechs.some((m) => !m.done && g.hostile(p, m.owner) && this.nearOurLand(m.x, m.y, 60));
+    const pressed = p.incomingAttacks.filter((a) => !a.done).length >= 2;
+    if (!easy && (mechThreat || pressed) && guns < Math.min(4, 1 + Math.floor(cities / 3))) {
+      const cost = this.cfg.unitCost(UnitType.ARTILLERY, guns, p);
+      if (p.gold >= cost + reserve) {
+        const t = this.tileNearThreat() ?? this.randomInnerTile();
+        if (t !== null && g.build(p, UnitType.ARTILLERY, t).ok) return true;
+      }
+    }
+    // Repair Yard: only worth it once we have mechs or walls to keep alive.
+    if (p.researches.has('field_engineering')) {
+      const yards = p.unitsOf(UnitType.REPAIR).length;
+      const worth = p.mechs.filter((m) => !m.done).length > 0 || p.numWallTiles > 40;
+      if (worth && yards < 2 && p.gold >= this.cfg.unitCost(UnitType.REPAIR, yards, p) + reserve) {
+        const t = this.tileNearThreat() ?? this.randomInnerTile(20);
+        if (t !== null && g.build(p, UnitType.REPAIR, t).ok) return true;
       }
     }
     const mechReserve = this.wantMechs || (this.hardOrWorse && cities >= 4) ? this.cfg.unitCost(UnitType.MECH, p.mechs.length, p) * 0.5 : 0;
@@ -588,13 +658,51 @@ class NationAI {
         if (dst !== null && dst >= 0) g.buildMech(p, dst);
       }
     }
-    // re-task idle / misplaced mechs every so often
-    if (target >= 0 && this.rng.chance(2)) {
-      for (const m of live) {
-        if (m.engaged) continue;
-        if (g.dist(m.patrol, target) > 25) g.moveMech(p, m.id, target);
+    // Standing orders. A mech that is just parked is a wasted 2M, so each one gets a job based on how
+    // the war is going: hold the line when we are being pushed, march into the enemy when we are not,
+    // and walk our own border when there is no war at all. Re-checked every few seconds, not every tick.
+    if (!this.rng.chance(3)) return;
+    const incoming = p.incomingAttacks.filter((a) => !a.done).reduce((sum, a) => sum + a.troops, 0);
+    const pressed = incoming > p.troops * 0.25;
+    for (const m of live) {
+      if (m.engaged) continue;
+      let mode = 'roam', orderTarget = 0;
+      if (pressed) mode = 'defend';
+      else if (enemy && g.hostile(p, enemy)) {
+        // spare mechs go disrupt the enemy's interior while the rest hold the shared front
+        mode = 'assault'; orderTarget = enemy.smallID;
       }
+      if (m.mode !== mode || m.orderTarget !== orderTarget) g.setMechMode(p, m.id, mode, orderTarget);
     }
+  }
+  nearOurLand(x, y, r) {
+    const g = this.game, p = this.p;
+    const t = g.ref(Math.round(Math.max(0, Math.min(g.width - 1, x))), Math.round(Math.max(0, Math.min(g.height - 1, y))));
+    if (g.owner[t] === p.smallID) return true;
+    const c = g.centroid(p);
+    return c ? Math.hypot(c.x - x, c.y - y) <= r + Math.sqrt(p.numTiles) : false;
+  }
+  // Somewhere of ours close to whatever is hurting us: where a battery or repair yard earns its keep.
+  tileNearThreat() {
+    const g = this.game, p = this.p;
+    let fx = null, fy = null;
+    const inc = p.incomingAttacks.filter((a) => !a.done && a.markX >= 0).sort((a, b) => b.troops - a.troops)[0];
+    if (inc) { fx = inc.markX; fy = inc.markY; }
+    else {
+      const m = g.mechs.find((x) => !x.done && g.hostile(p, x.owner) && this.nearOurLand(x.x, x.y, 60));
+      if (m) { fx = m.x; fy = m.y; }
+    }
+    if (fx === null) return null;
+    // an inner tile of ours that is close to it, but not right on the border where it will be overrun
+    let best = null, bd = Infinity, i = 0;
+    for (const t of p.tiles) {
+      if (i++ % 7) continue;
+      if (i > 4000) break;
+      if (p.border.has(t) || g.unitNear(t, 3)) continue;
+      const d = (g.x(t) - fx) ** 2 + (g.y(t) - fy) ** 2;
+      if (d > 15 * 15 && d < bd) { bd = d; best = t; }
+    }
+    return best;
   }
   // A tile just inside the enemy's border, nearest to us: mechs park there and grind the frontier.
   mechTargetTile(enemy) {

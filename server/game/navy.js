@@ -210,6 +210,23 @@ module.exports = {
       this.neutralizeArea(owner, s.tx, s.ty, 2, 1500, 'missile');
       return;
     }
+    if (s.kind === 'artillery') {
+      // Artillery is anti-mech first: a direct hit is what makes a battery worth its price. It also
+      // thins whoever is attacking underneath, but it never takes ground - the tile stays the defender's.
+      let hit = null, bd = Infinity;
+      for (const m of this.mechs) {
+        if (m.done || !this.hostile(owner, m.owner)) continue;
+        const d = (m.x - s.tx) ** 2 + (m.y - s.ty) ** 2;
+        if (d <= (s.radius + 1) ** 2 && d < bd) { bd = d; hit = m; }
+      }
+      if (hit) hit.hp -= s.dmg;
+      for (const a of owner.incomingAttacks) {
+        if (a.done || a.markX < 0) continue;
+        if (Math.hypot(a.markX - s.tx, a.markY - s.ty) <= s.radius + 2) a.troops = Math.max(0, a.troops - s.troopKill);
+      }
+      this.events.push({ k: 'shellHit', x: s.tx, y: s.ty });
+      return;
+    }
     if (s.kind === 'mech') {
       const u = s.structTile >= 0 ? this.unitAt(s.structTile) : null;
       if (u && this.hostile(owner, u.owner)) {

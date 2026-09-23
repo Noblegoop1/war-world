@@ -269,6 +269,12 @@ class Lobby {
       }
       case 'moveMech': { const r = g.moveMech(p, Number(m.id), tile); if (!r.ok) c.send({ t: 'toast', msg: r.reason }); break; }
       case 'moveShip': { const r = g.moveShip(p, Number(m.id), tile); if (!r.ok) c.send({ t: 'toast', msg: r.reason }); break; }
+      case 'mechMode': {
+        const r = g.setMechMode(p, Number(m.id) || 0, String(m.mode), Number(m.target) || 0);
+        if (!r.ok) c.send({ t: 'toast', msg: r.reason });
+        else c.send({ t: 'toast', msg: `${r.count} mech${r.count > 1 ? 's' : ''} set to ${r.mode}${r.target ? ' ' + (g.playersBySmall[r.target] || {}).name : ''}`, info: true });
+        break;
+      }
       case 'reinforce': { if (tile === null) return; const r = g.reinforcePost(p, tile); if (!r.ok) c.send({ t: 'toast', msg: r.reason }); else c.send({ t: 'toast', msg: `Garrisoned ${r.added.toLocaleString()} troops`, info: true }); break; }
       case 'focus': { if (tile !== null) g.setFocus(p, tile); break; }
       case 'wall': {
