@@ -84,7 +84,7 @@ const CITY_GOLD_BY_LEVEL = [0, 1, 2.2, 3.6, 6.5];        // multiples of the uni
 const PEACE_DIVIDEND = 1.3;                              // passive gold multiplier while at peace
 const PEACE_DIVIDEND_TICKS = 900;                        // 90s since you last attacked a nation
 const CONQUEST_TREASURY_SHARE = 0.5;
-const ALLIED_TRADE_BONUS = 1.15;                       // trade ships between allies pay both sides 15% more
+const ALLIED_TRADE_BONUS = 1.75;                       // trade ships between allies pay both sides 75% more
 // Declaring war: a standing war economy costs gold, and the declared target is hit harder.
 const WAR_GOLD_PENALTY = 0.8;
 const WAR_TROOP_BONUS = 1.15;

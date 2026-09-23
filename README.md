@@ -152,7 +152,7 @@ Open <http://localhost:3000>, pick a name, **Create game**, choose a map, **Star
   times the gold, so conquest alone doesn't run away with it), and **Cities**, which pay by level
   (0.7K/s at level 1, 2.5K/s at level 3, a big jump at level 4). Go 90 seconds without attacking a
   nation and a **peace dividend** multiplies all of that by 1.3. Trade ships between **allies** pay
-  both sides **15% more**. Hover your gold for a live breakdown by source.
+  both sides **75% more**. Hover your gold for a live breakdown by source.
 * **Prices** — Cities, Ports and Factories double in price with each one you own (125K, 250K, …)
   up to 2M. Defense Posts 75K each more (max 600K), SAMs 1.5M then 3M, Silo 1.5M, Airport 8M,
   Warships 300K each more (max 1.5M), Submarines 750K each more (max 3M), Mechs 2M + 2.5M per mech
@@ -176,7 +176,7 @@ Open <http://localhost:3000>, pick a name, **Create game**, choose a map, **Star
   base, land, Cities, trade ships, trains, conquest and plunder. **Hover either number** — on any
   nation, AI or human — for the full breakdown, including peace-dividend and war penalties.
 * **Alliances** — request from a player's radial or the leaderboard. Allies can't attack each other,
-  can donate troops/gold, and earn 15% more from trade with each other. Breaking one marks you a **traitor** for 30s (weaker defense). Nuking
+  can donate troops/gold, and earn 75% more from trade ships sent to each other. Breaking one marks you a **traitor** for 30s (weaker defense). Nuking
   an ally breaks the alliance.
 * **Win** by owning 80% of the land (configurable). Any player squeezed under 100 tiles is
   conquered outright — the attacker takes their land and gold.
@@ -244,18 +244,28 @@ taking the game down. Tested with 64 human clients in one game.
 
 ## Host it on a website
 
-The server is one Node process that reads `PORT` from the environment. Push this folder to GitHub,
-then:
+The server is one Node process that reads `PORT` from the environment and keeps every game in memory,
+so it needs a host that runs a **long-lived process with WebSockets** — not a serverless / static host
+(Vercel, Netlify, GitHub Pages won't work). Push this folder to GitHub, then pick one:
 
-* **Render (free)** — <https://render.com> → *New +* → *Blueprint* → pick the repo (`render.yaml`
-  configures it). Free instances sleep after ~15 min idle; the game pings itself while people play so
-  it won't sleep mid-match.
-* **Railway (~$5/mo, never sleeps)** — *New Project* → *Deploy from GitHub repo* → *Generate Domain*.
+* **Railway (easiest, ~$5/mo, never sleeps)** — sign in with GitHub → *New Project* → *Deploy from
+  GitHub repo* → pick the repo (it builds the `Dockerfile`) → *Settings → Networking → Generate
+  Domain*. Share that https URL.
 * **Fly.io** — `fly launch --copy-config --yes` then `fly deploy` (uses `fly.toml` + `Dockerfile`).
-* **Any VPS / Docker** — `docker build -t warworld . && docker run -p 80:3000 warworld`.
+* **A VPS (best value for a lot of players)** — e.g. Hetzner / DigitalOcean with 2 vCPU and 2-4 GB:
+  `docker build -t warworld . && docker run -d --restart unless-stopped -p 3000:3000 warworld`, then
+  put Caddy in front of it for a domain and HTTPS.
+* **Render (free)** — *New + → Blueprint* → pick the repo (`render.yaml`). Fine for trying it with a
+  couple of friends, but the free tier has a tenth of a CPU (big maps with many AI nations will
+  stutter) and it sleeps after ~15 minutes without traffic.
 
-Every redeploy restarts the process and ends running games (state is in memory), so push between
-sessions. `MAX_LOBBIES` (default 50) caps concurrent games; a 512 MB instance handles several.
+**Sizing** (measured): one full-size World game with 50 nations and tribes uses ~250-320 MB of memory
+and about 4% of a modern CPU core on average, with short spikes; each further game adds roughly
+60-120 MB. Compact maps use about half. Set `MAX_LOBBIES` so games fit in memory — about 2 on a
+512 MB instance, 5 on 1 GB, 12 on 2 GB (the default of 50 assumes a big machine).
+
+Every redeploy restarts the process and ends running games (state is in memory), so deploy between
+sessions. Choose a region close to your players.
 
 ## Settings
 

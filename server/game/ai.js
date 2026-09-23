@@ -757,7 +757,7 @@ class NationAI {
   }
   maybeSendAllianceRequests(enemies) {
     const g = this.game, p0 = this.p;
-    // Early on, friendly neighbours are worth courting: allied trade pays both sides 15% more.
+    // Early on, friendly neighbours are worth courting: allied trade pays both sides 75% more.
     if (g.tick < EARLY_GAME_TICKS && this.rng.chance(3)) {
       const cw = CHOICE_WORDS.seekAlly;
       const cands = this.remembered().map(([o]) => o).filter((o) => o.type !== PlayerType.BOT && g.hostile(p0, o)
