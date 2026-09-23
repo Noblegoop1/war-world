@@ -113,6 +113,15 @@ module.exports = {
         let landing = Math.floor(a.troops * R.landingBonus(p) * R.airdropBonus(p));
         if (ownerNow) ownerNow.removeTroops(ownerNow.troops / Math.max(1, ownerNow.numTiles));
         this.conquer(p, dst);
+        // SEAD: the drop goes in on top of the air defences and takes them apart
+        if (R.sead(p)) {
+          for (const u of [...this.units]) {
+            if (u.type !== UnitType.SAM || !this.hostile(p, u.owner)) continue;
+            if (Math.hypot(this.x(u.tile) - this.x(dst), this.y(u.tile) - this.y(dst)) > this.config.seadRadius()) continue;
+            this.events.push({ k: 'structHit', p: u.owner.smallID, type: u.type, x: this.x(u.tile), y: this.y(u.tile) });
+            this.removeUnit(u);
+          }
+        }
         p.addTroops(landing);
         this.sendAttack(p, ownerNow, landing, dst);
         if (ownerNow) this.handleDeadDefender(p, ownerNow);

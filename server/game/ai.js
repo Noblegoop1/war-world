@@ -6,12 +6,21 @@
 const { Rng } = require('./rng');
 const { PlayerType, UnitType, NukeType, Difficulty, RESEARCH_BY_ID } = require('./config');
 const R = require('./research').effects;
+const { bezierArc, bezierPoint } = require('./path');
 
 // Colonising empty landmasses (see maybeColonise).
 const COLONISE_COOLDOWN = 200;             // ticks between attempts
+// Minimum ticks between an AI's strategic strikes (easy -> impossible). The AI now routes around SAM
+// umbrellas and lands most of what it fires, and gold is plentiful, so the pacing has to come from here
+// rather than from missiles being wasted.
+const NUKE_CADENCE = [Infinity, 1200, 750, 500];
 const COLONISE_MIN_TROOP_RATIO = 0.35;     // don't ship out unless reasonably stocked
 const COLONISE_ISOLATION_BONUS = 1.5;      // how much an untouched island beats contested ground
-const COLONISE_SCORE_THRESHOLD = [900, 500, 250, 120]; // easy -> impossible
+const COLONISE_SCORE_THRESHOLD = [400, 160, 60, 25];   // easy -> impossible
+// A small island close by is worth a small boat even though its score is low. Within this many tiles,
+// any island at least this big gets settled once we have troops to spare.
+const SMALL_ISLAND_RANGE = 110;
+const SMALL_ISLAND_MIN = 10;
 
 class NationAI {
   constructor(game, player, seed) {
@@ -42,6 +51,16 @@ class NationAI {
     this.coloniseAfter = this.rng.int(0, COLONISE_COOLDOWN);
     this.airliftAfter = 0;
     this.wantAirships = 0;
+    this.wantAntiSam = 0;
+    this.wantAntiAir = 0;
+    // ---- intelligence (see observe / note) ----
+    this.intel = new Map();       // smallID -> { now, prev } snapshots of every rival
+    this.grudge = new Map();      // smallID -> 0..100, what they have done to us lately
+    this.samWall = new Map();     // smallID -> times their SAMs shot our missiles down
+    this.airWall = new Map();     // smallID -> times they downed our airships
+    this.threat = { sams: 0, silos: 0, mechs: 0, air: 0, navy: 0, artillery: 0, bombers: 0 };
+    this.posture = 'expand';
+    this.labCheckAfter = 0;
   }
 
   get difficulty() { return this.cfg.difficulty(); }
@@ -69,7 +88,9 @@ class NationAI {
       if (offset === oneThird) this.handleMechs();
       return;
     }
+    this.observe();
     this.handleAllianceRequests();
+    this.handleLabs();
     this.handleStructures();
     this.handleNavy();
     this.handleMechs();
@@ -79,10 +100,160 @@ class NationAI {
     this.maybeBomb();
   }
 
+  // ======================================================================================
+  // Intelligence. A short memory of every rival - what they have built, which doctrines they hold,
+  // whether they are growing, and what they have done to us - refreshed each time we act. Posture,
+  // research picks and weapon choices read from it instead of only reacting to whoever is adjacent.
+  // ======================================================================================
+  observe() {
+    const g = this.game, p = this.p;
+    const neighbours = new Set(g.neighborsOf(p).players);
+    const myMass = p.border.size ? g.landmass[p.border.values().next().value] : -1;
+    const T = { sams: 0, silos: 0, mechs: 0, air: 0, navy: 0, artillery: 0, bombers: 0 };
+    for (const o of g.players) {
+      if (o === p || !o.alive || o.type === PlayerType.BOT) continue;
+      const n = {};
+      for (const u of o.units) if (u.constructionLeft === 0) n[u.type] = (n[u.type] || 0) + 1;
+      const snap = {
+        tick: g.tick, tiles: o.numTiles, troops: o.troops, gold: o.gold, n,
+        mechs: o.mechs.filter((m) => !m.done).length,
+        warships: o.warships.filter((w) => !w.done).length,
+        subs: o.subs.filter((sb) => !sb.done && sb.detected).length,   // we only know about subs we have seen
+        airships: o.airships.filter((a) => !a.done).length,
+        researches: [...o.researches],
+      };
+      const rec = this.intel.get(o.smallID);
+      this.intel.set(o.smallID, { now: snap, prev: rec ? rec.now : snap });
+      // grudges build up while someone is hitting us and fade otherwise
+      let gr = (this.grudge.get(o.smallID) || 0) * 0.93;
+      if (p.incomingAttacks.some((a) => !a.done && a.attacker === o)) gr += 12;
+      if (p.lastNukedBy === o) gr += 25;
+      this.grudge.set(o.smallID, Math.min(100, gr));
+      if (!g.hostile(p, o)) continue;
+      // how much this rival matters to us: next door, same continent, or far away
+      let w = neighbours.has(o) ? 1 : (o.border.size && g.landmass[o.border.values().next().value] === myMass ? 0.55 : 0.3);
+      w *= 1 + gr / 60;
+      T.sams += (n.sam || 0) * w;
+      T.silos += (n.silo || 0) * w;
+      T.mechs += snap.mechs * w * (neighbours.has(o) ? 1.5 : 1);
+      T.air += ((n.airport || 0) * 2 + snap.airships) * w;
+      T.navy += (snap.warships + snap.subs + (o.researches.has('submarine_warfare') ? 2 : 0)) * w;
+      T.artillery += (n.artillery || 0) * w;
+      if (o.researches.has('strategic_bombers')) T.bombers += w;
+    }
+    this.threat = T;
+    this.posture = this.choosePosture(neighbours);
+  }
+  // What kind of turn is this? Drives what we build and how much we keep in reserve.
+  choosePosture(neighbours) {
+    const g = this.game, p = this.p;
+    const incoming = p.incomingAttacks.filter((a) => !a.done).reduce((sum, a) => sum + a.troops, 0);
+    const hostile = [...neighbours].filter((o) => g.hostile(p, o));
+    const strongest = hostile.reduce((m, o) => Math.max(m, o.troops), 0);
+    if (incoming > p.troops * 0.35 || strongest > p.troops * 1.6) return 'turtle';
+    if (g.neighborsOf(p).touchesNeutral) return 'expand';
+    const weak = hostile.find((o) => o.troops < p.troops * 0.6 || (this.grudge.get(o.smallID) || 0) > 40);
+    if (weak && p.troops > this.cfg.maxTroops(p) * 0.5) return 'war';
+    return 'build';
+  }
+  // Remember the things that happen to us between turns. Called by the game every tick.
+  note(events) {
+    const me = this.p.smallID;
+    for (const e of events) {
+      if (e.k === 'samhit' && e.vs === me) this.samWall.set(e.by, (this.samWall.get(e.by) || 0) + 1);
+      else if (e.k === 'airshipDown' && e.p === me) this.airWall.set(e.by, (this.airWall.get(e.by) || 0) + 1);
+      else if (e.k === 'sunk' && e.p === me && e.by) this.grudge.set(e.by, Math.min(100, (this.grudge.get(e.by) || 0) + 4));
+    }
+  }
+  // Enemy SAMs that would get a shot at a missile landing on this tile.
+  samCover(tile) {
+    const g = this.game, p = this.p;
+    const x = g.x(tile), y = g.y(tile);
+    let n = 0;
+    for (const u of g.units) {
+      if (u.type !== UnitType.SAM || u.constructionLeft > 0 || !g.hostile(p, u.owner)) continue;
+      const r = this.cfg.samRange(u.owner);
+      if ((g.x(u.tile) - x) ** 2 + (g.y(u.tile) - y) ** 2 <= r * r) n++;
+    }
+    return n;
+  }
+  // Enemy SAMs that get a shot at a missile on its way from our nearest silo to this tile. The missile
+  // flies a curved arc and any SAM along that arc can take it, not just the ones around the target -
+  // so walk the same arc the simulation uses and count every launcher whose umbrella it crosses.
+  samCoverPath(tile) {
+    const g = this.game, p = this.p;
+    const silos = p.completedUnitsOf(UnitType.SILO);
+    if (!silos.length) return this.samCover(tile);
+    const tx = g.x(tile), ty = g.y(tile);
+    const silo = silos.reduce((a, b) => (g.dist(a.tile, tile) <= g.dist(b.tile, tile) ? a : b));
+    const arc = bezierArc(g.x(silo.tile) + 0.5, g.y(silo.tile) + 0.5, tx + 0.5, ty + 0.5);
+    const sams = g.units.filter((u) => u.type === UnitType.SAM && u.constructionLeft === 0 && g.hostile(p, u.owner));
+    if (!sams.length) return 0;
+    const hit = new Set();
+    for (let t = 0; t <= 1.0001; t += 0.04) {
+      const pt = bezierPoint(arc, t);
+      for (const u of sams) {
+        if (hit.has(u)) continue;
+        const r = this.cfg.samRange(u.owner);
+        if ((g.x(u.tile) - pt.x) ** 2 + (g.y(u.tile) - pt.y) ** 2 <= r * r) hit.add(u);
+      }
+    }
+    return hit.size;
+  }
+  // The deepest tile we own near a point: where a lab or anything precious should live.
+  deepTileNear(cx, cy, radius, avoid = () => false) {
+    const g = this.game, p = this.p;
+    const front = [];
+    let i = 0;
+    for (const t of p.border) {
+      if (i++ % 3) continue;
+      const c = g.neighbors4(t, this.nb4 || (this.nb4 = [0, 0, 0, 0]));
+      for (let k = 0; k < c; k++) { const o = g.owner[this.nb4[k]]; if (o && o !== p.smallID) { front.push(t); break; } }
+      if (front.length > 300) break;
+    }
+    let best = null, bestScore = -Infinity;
+    for (let tries = 0; tries < 60; tries++) {
+      const x = Math.round(cx + this.rng.int(-radius, radius)), y = Math.round(cy + this.rng.int(-radius, radius));
+      if (!g.valid(x, y)) continue;
+      const t = g.ref(x, y);
+      if (g.owner[t] !== p.smallID || p.border.has(t) || g.unitNear(t, 3) || avoid(t)) continue;
+      let dFront = 1e9;
+      for (const f of front) { const d = (g.x(f) - x) ** 2 + (g.y(f) - y) ** 2; if (d < dFront) dFront = d; }
+      const score = Math.sqrt(dFront) - this.samCover(t) * 0 - Math.hypot(x - cx, y - cy) * 0.1;
+      if (score > bestScore) { bestScore = score; best = t; }
+    }
+    return best;
+  }
+  // Labs: put them deep inside, upgrade the busy one, and open another when the slots run out.
+  handleLabs() {
+    const g = this.game, p = this.p;
+    if (this.difficulty === Difficulty.EASY || g.tick < this.labCheckAfter) return;
+    this.labCheckAfter = g.tick + 150;
+    const labs = p.completedUnitsOf(UnitType.LAB);
+    const reserve = p.unitsOf(UnitType.SILO).length ? this.cfg.nukeCost(NukeType.ATOM, p) : 0;
+    // speed up whichever lab is working right now
+    const busy = p.research ? labs.find((l) => l.id === p.research.labId) : null;
+    if (busy && busy.level < this.cfg.maxUnitLevel(p, UnitType.LAB) && this.posture !== 'turtle'
+        && p.gold >= this.cfg.labUpgradeCost(busy.level) * 1.1 + reserve * 0.3) {
+      if (g.build(p, UnitType.LAB, busy.tile).ok) return;
+    }
+    // all slots used: another lab, if we can afford the 5x ladder without starving the army
+    if (labs.length && p.researchCount() >= this.cfg.maxResearchesPerPlayer(p) && this.posture === 'build') {
+      const cost = this.cfg.unitCost(UnitType.LAB, g.costIndex(p, UnitType.LAB), p);
+      if (p.gold >= cost * 1.3 + reserve) {
+        const fac = p.completedUnitsOf(UnitType.FACTORY)[0];
+        if (fac) {
+          const t = this.deepTileNear(g.x(fac.tile), g.y(fac.tile), 80, (tt) => g.hasPopulationNear(tt, this.cfg.labMinGapFromPopulation()));
+          if (t !== null) g.build(p, UnitType.LAB, t);
+        }
+      }
+    }
+  }
+
   // Called when a research completes: adopt the doctrine.
   onResearch() {
     const p = this.p;
-    this.aggression = 1; this.buildBias = 1; this.wantFactories = 1; this.wantMechs = 0; this.wantWarships = 0; this.wantSubs = 0; this.wantMines = 0; this.wantBombers = 0; this.wantAirships = 0; this.nukeBias = 1;
+    this.aggression = 1; this.buildBias = 1; this.wantFactories = 1; this.wantMechs = 0; this.wantWarships = 0; this.wantSubs = 0; this.wantMines = 0; this.wantBombers = 0; this.wantAirships = 0; this.wantAntiSam = 0; this.wantAntiAir = 0; this.nukeBias = 1;
     for (const id of p.researches) {
       const r = RESEARCH_BY_ID[id];
       if (!r || !r.ai) continue;
@@ -95,6 +266,8 @@ class NationAI {
       if (r.ai.mines) this.wantMines += r.ai.mines;
       if (r.ai.bombers) this.wantBombers += r.ai.bombers;
       if (r.ai.airships) this.wantAirships += r.ai.airships;
+      if (r.ai.antiSam) this.wantAntiSam += r.ai.antiSam;
+      if (r.ai.antiAir) this.wantAntiAir += r.ai.antiAir;
       if (r.ai.nukes) this.nukeBias *= 1 + 0.5 * r.ai.nukes;
     }
     // war economy pays for attacking: keep less in reserve
@@ -266,12 +439,24 @@ class NationAI {
       const score = (r.size * (1 + COLONISE_ISOLATION_BONUS * isolation)) / (1 + sd / 60);
       if (score > bestScore) { bestScore = score; best = r; bestShore = shore; }
     }
+    // Nearby small islands: the score formula undervalues them, but they cost almost nothing to take.
+    if (!best || bestScore < COLONISE_SCORE_THRESHOLD[this.diffIndex]) {
+      for (const r of regions) {
+        if (r.size < SMALL_ISLAND_MIN || r.hostile > 0) continue;   // untouched islands only
+        for (const t of r.shores) {
+          const d = g.dist(t, g.ref(Math.round(c.x), Math.round(c.y)));
+          if (d <= SMALL_ISLAND_RANGE && (!best || bestScore < COLONISE_SCORE_THRESHOLD[this.diffIndex] || d < 40)) { best = r; bestShore = t; bestScore = 1e9; break; }
+        }
+        if (bestScore === 1e9) break;
+      }
+    }
     if (!best) return false;
     // Weaker AIs only bother with what is close; the good ones will cross an ocean for a free continent.
     if (bestScore < COLONISE_SCORE_THRESHOLD[this.diffIndex]) return false;
     if (g.pathBudget-- <= 0) return false;
-    const troops = this.calculateAttackTroops(null, true);
+    let troops = this.calculateAttackTroops(null, true);
     if (troops === null) return false;
+    troops = Math.min(troops, Math.max(4000, best.size * 120));   // enough to take the island, no more
     const sent = g.sendBoat(p, bestShore, troops) !== null;
     // back off either way: a failed route usually means no sea path, and retrying every tick is waste
     this.coloniseAfter = g.tick + (sent ? COLONISE_COOLDOWN : COLONISE_COOLDOWN * 3);
@@ -412,13 +597,31 @@ class NationAI {
     if (lvl1 && (this.hardOrWorse || this.wantMechs || this.rng.chance(3)) && cities >= 3 && p.gold >= this.cfg.unitCost(UnitType.FACTORY, p.unitLevels(UnitType.FACTORY), p) + reserve) {
       if (g.build(p, UnitType.FACTORY, lvl1.tile).ok) return true;
     }
+    // Push the factory that builds our mechs (and the port that builds our ships) up a level once we
+    // actually field those units: better new units, and the idle ones come home to refit.
+    if (!easy && this.posture !== 'turtle') {
+      const liveMechs = p.mechs.filter((m) => !m.done).length, liveShips = p.warships.filter((w) => !w.done).length + p.subs.filter((sb) => !sb.done).length;
+      const mf = factories.filter((f) => f.constructionLeft === 0 && f.level >= 2 && f.level < this.cfg.maxUnitLevel(p, UnitType.FACTORY)).sort((a, b) => b.level - a.level)[0];
+      if (mf && liveMechs >= 1 && p.gold >= this.cfg.unitCost(UnitType.FACTORY, p.unitLevels(UnitType.FACTORY), p) * 1.2 + reserve) {
+        if (g.build(p, UnitType.FACTORY, mf.tile).ok) return true;
+      }
+      const pt = p.completedUnitsOf(UnitType.PORT).filter((u) => u.level < this.cfg.maxUnitLevel(p, UnitType.PORT)).sort((a, b) => b.level - a.level)[0];
+      if (pt && liveShips >= 2 && p.gold >= this.cfg.unitCost(UnitType.PORT, p.unitLevels(UnitType.PORT), p) * 1.2 + reserve) {
+        if (g.build(p, UnitType.PORT, pt.tile).ok) return true;
+      }
+    }
     // Research Lab: near a factory (rail range), away from cities, once we have 3 cities.
     const labs = p.unitsOf(UnitType.LAB).length;
     if (!easy && labs < 1 && g.populationCount(p) >= this.cfg.populationRequiredForLab() && p.researchCount() < this.cfg.maxResearchesPerPlayer()) {
       const fac = factories.find((f) => f.constructionLeft === 0);
       if (fac) {
         const cost = this.cfg.unitCost(UnitType.LAB, labs, p);
-        if (p.gold >= cost + reserve) { for (let i = 0; i < 12; i++) { const t = this.tileNearFactory(fac); if (t !== null && g.build(p, UnitType.LAB, t).ok) return true; } }
+        if (p.gold >= cost + reserve) {
+          // Losing a lab loses the research, so it goes as deep inside as rail range allows.
+          const deep = this.deepTileNear(g.x(fac.tile), g.y(fac.tile), 70, (tt) => g.hasPopulationNear(tt, this.cfg.labMinGapFromPopulation()));
+          if (deep !== null && g.build(p, UnitType.LAB, deep).ok) return true;
+          for (let i = 0; i < 12; i++) { const t = this.tileNearFactory(fac); if (t !== null && g.build(p, UnitType.LAB, t).ok) return true; }
+        }
         else if (cities >= 4) return false; // save up
       }
     }
@@ -449,14 +652,21 @@ class NationAI {
         if (t !== null && g.build(p, UnitType.ARTILLERY, t).ok) return true;
       }
     }
-    // Airport: a late, enormous purchase. Only worth it when someone we want dead is behind a wall of
-    // SAMs and warships, which is exactly when nothing else we own can reach them.
-    if (!easy && !p.unitsOf(UnitType.AIRPORT).length && p.gold >= this.cfg.unitCost(UnitType.AIRPORT, 0, p) + reserve) {
+    // Airport: a late, enormous purchase, and the answer to a SAM wall. If the rivals we care about sit
+    // behind SAMs (or their SAMs have already shot our missiles down), stop spending on small things and
+    // save for one; then it goes deep inside our land, and maybeAirlift aims the drops at their launchers.
+    if (!easy && !p.unitsOf(UnitType.AIRPORT).length && !g.settings.disableBoats) {
+      const stoppedUs = [...this.samWall.values()].reduce((a, b) => a + b, 0);
       const turtled = g.players.some((o) => o !== p && o.alive && g.hostile(p, o) && o.numTiles > 300
         && (o.unitsOf(UnitType.SAM).length >= 2 || o.warships.filter((w) => !w.done).length >= 3));
-      if (turtled || this.wantAirships) {
-        const t = this.randomInnerTile(25);
-        if (t !== null && g.build(p, UnitType.AIRPORT, t).ok) return true;
+      const want = this.wantAirships || stoppedUs >= 2 || (turtled && this.threat.sams >= 2.5 && this.hardOrWorse);
+      if (want && this.posture !== 'turtle') {
+        const cost = this.cfg.unitCost(UnitType.AIRPORT, 0, p);
+        if (p.gold >= cost + reserve) {
+          const c = g.centroid(p);
+          const t = (c && this.deepTileNear(c.x, c.y, 40, (tt) => !!g.samAirportConflict(p, UnitType.AIRPORT, tt))) ?? this.randomInnerTile(25);
+          if (t !== null && g.build(p, UnitType.AIRPORT, t).ok) return true;
+        } else if (p.gold >= cost * 0.35) return false;   // saving up: skip the small stuff this turn
       }
     }
     // Repair Yard: only worth it once we have mechs or walls to keep alive.
@@ -480,30 +690,56 @@ class NationAI {
   pickResearch(choices) {
     const p = this.p, g = this.game;
     if (this.difficulty === Difficulty.EASY) return choices[this.rng.int(0, choices.length - 1)];
+    this.observe();   // pick with fresh eyes
+    const T = this.threat;
     const coastal = this.shoreTiles(p, 1, true).length > 0;
-    const underAttack = p.incomingAttacks.length > 0;
     const hasFactory2 = g.mechFactories(p).length > 0;
-    const enemiesHaveNukes = g.units.some((u) => u.type === UnitType.SILO && g.hostile(p, u.owner));
+    const silos = p.unitsOf(UnitType.SILO).length;
+    const hasAirport = p.unitsOf(UnitType.AIRPORT).length > 0;
+    const cities = p.unitsOf(UnitType.CITY).length;
+    // nations we can only reach across water are what amphibious and airborne doctrines are for
+    // rivals we can only reach over water; capped, because on a world map that is nearly everyone
+    const overseas = Math.min(3, g.players.filter((o) => o !== p && o.alive && g.hostile(p, o) && o.type !== PlayerType.BOT && !g.neighborsOf(p).players.includes(o)).length);
+    const samsStoppedUs = [...this.samWall.values()].reduce((a, b) => a + b, 0);
     const score = (id) => {
       const r = RESEARCH_BY_ID[id];
-      if (!r) return -1;
+      if (!r) return -99;
       let s = 5;
       for (const tag of r.tags) {
-        if (tag === 'mech') s += hasFactory2 || p.mechs.length ? 8 : (this.hardOrWorse ? 3 : -3);
-        if (tag === 'defense') s += underAttack ? 7 : 2;
-        if (tag === 'aggro') s += this.hardOrWorse ? 4 : 1;
-        if (tag === 'econ') s += p.gold < 500000 ? 6 : 2;
-        if (tag === 'navy') s += coastal ? (this.hardOrWorse ? 4 : 2) : -12;
-        if (tag === 'air') s += p.unitsOf(UnitType.SILO).length ? 4 : -2;
-        if (tag === 'nuke') s += p.unitsOf(UnitType.SILO).length ? 5 : -4;
+        if (tag === 'mech') s += hasFactory2 || p.mechs.length ? 6 : (this.hardOrWorse ? 2 : -4);
+        if (tag === 'defense') s += this.posture === 'turtle' ? 7 : 1;
+        if (tag === 'aggro') s += this.posture === 'war' ? 5 : this.hardOrWorse ? 2 : 0;
+        if (tag === 'econ') s += this.posture === 'build' ? 7 : p.gold < 500000 ? 4 : 1;
+        if (tag === 'navy') s += coastal ? (T.navy > 1 ? 5 : 2) : -14;
+        if (tag === 'nuke') s += silos ? 4 : -4;
       }
-      if (id === 'nuclear_deterrence' && enemiesHaveNukes) s += 6;
-      if (id === 'fighter_networks' && !g.players.some((o) => o.researches.has('strategic_bombers') && g.hostile(p, o))) s -= 6;
-      if (id === 'nuclear_subs' && !p.researches.has('submarine_warfare')) s -= 20;
-      return s + this.rng.int(0, 3);
+      // what the rivals actually have decides the rest
+      switch (id) {
+        case 'cluster_munitions': s += (T.sams * 4 + samsStoppedUs * 5) * (silos ? 1 : 0.3); break;
+        case 'decoy_warheads': s += (T.sams * 2.5 + samsStoppedUs * 3) * (silos ? 1 : 0.3); break;
+        case 'hypersonic_missiles': s += (T.sams * 2 + samsStoppedUs * 2) * (silos ? 1 : 0.3); break;
+        case 'sead_doctrine': s += T.sams * 3.5 * (hasAirport ? 1.5 : 0.6) + samsStoppedUs * 2; break;
+        case 'field_engineering': s += T.mechs * 5 + (p.mechs.length ? 3 : 0) + (p.numWallTiles > 40 ? 3 : 0); break;
+        case 'interceptor_screen': s += T.air * 5; break;
+        // mainly an answer to airships; the -80% damage makes it a poor raider on its own
+        case 'airborne_mechs': s += T.air * 4 * (hasFactory2 ? 1 : 0.3) + (T.air > 0.5 ? overseas * 0.5 : -4); break;
+        case 'amphibious_mech': s += (T.navy * 2.5 + overseas * 2) * (coastal && hasFactory2 ? 1 : 0.2); break;
+        case 'coastal_defense': s += T.navy * 3 * (coastal ? 1 : 0); break;
+        case 'hardened_infra': s += T.silos * 3; break;
+        case 'nuclear_deterrence': s += T.silos * 2.5 * (silos ? 1 : 0.2); break;
+        case 'fighter_networks': s += T.bombers * 5 - (T.bombers ? 0 : 6); break;
+        case 'strategic_airlift': case 'airbase_network': case 'airborne_doctrine': s += hasAirport ? 6 + T.sams : -6; break;
+        case 'megacity': s += cities >= 5 ? 5 : -3; break;
+        case 'heavy_industry': s += p.unitsOf(UnitType.FACTORY).length >= 2 ? 5 : -3; break;
+        case 'nuclear_subs': s += p.researches.has('submarine_warfare') ? 4 : -30; break;
+        default: break;
+      }
+      const noise = this.difficulty === Difficulty.MEDIUM ? 6 : 2;
+      return s + this.rng.int(0, noise);
     };
     return choices.slice().sort((a, b) => score(b) - score(a))[0];
   }
+
 
   // ---- walls: choke-point analysis --------------------------------------------------
   // Approximate min-cut: BFS inward from the front facing the attacker through our own land. Every BFS layer
@@ -678,10 +914,12 @@ class NationAI {
     // Amphibious mechs open up nations we could never walk to. That is the whole point of the doctrine,
     // and it was being ignored: pick an overseas victim and raid it.
     let raidTarget = null;
-    if (amphibious && !pressed) {
+    if (R.mechCrossesWater(p) && !pressed) {
+      const next = g.neighborsOf(p).players;
       const overseas = g.players.filter((o) => o !== p && o.alive && g.hostile(p, o) && o.numTiles > 40
-        && !g.neighborsOf(p).players.includes(o) && o.troops < p.troops * 1.2);
-      overseas.sort((a, b) => a.troops - b.troops);
+        && !next.includes(o) && o.troops < p.troops * 1.5);
+      // weakest first, then whoever has hurt us
+      overseas.sort((a, b) => (a.troops - (this.grudge.get(a.smallID) || 0) * 1e4) - (b.troops - (this.grudge.get(b.smallID) || 0) * 1e4));
       raidTarget = overseas[0] || null;
     }
 
@@ -696,28 +934,62 @@ class NationAI {
         if (dst !== null && dst >= 0) g.buildMech(p, dst);
       }
     }
-    if (!live.length || !this.rng.chance(3)) return;
+    if (!live.length || !this.rng.chance(2)) return;
 
     // ---- orders ----
-    // Hold back one mech per serious incoming attack, send the rest forward. A single mech parked on a
-    // threatened border is worth more than two wandering around the interior.
-    const needDefenders = pressed ? Math.min(live.length, Math.max(1, Math.ceil(live.length / 2))) : 0;
-    const sorted = [...live].sort((a, b) => b.hp / b.maxHp - a.hp / a.maxHp);
-    sorted.forEach((m, i) => {
-      if (m.engaged) return;
-      let mode = 'roam', orderTarget = 0;
-      const healthy = m.hp > m.maxHp * 0.45;
-      if (i < needDefenders) {
-        mode = 'defend';
-      } else if (raidTarget && healthy && i % 2 === 1) {
-        mode = 'assault'; orderTarget = raidTarget.smallID;   // sail over and cause havoc
-      } else if (enemy && g.hostile(p, enemy) && healthy && (tanky || this.hardOrWorse || p.troops > enemy.troops)) {
-        mode = 'assault'; orderTarget = enemy.smallID;
-      } else if (!healthy) {
-        mode = 'defend';   // hurt mechs fall back behind our own lines to bleed less
+    // Roles are handed out in priority order, one mech at a time, so even a nation with a single mech
+    // uses it for the most important job instead of leaving it to wander its own border:
+    //   1. hold the line when we are being pushed
+    //   2. air defence (Airborne Mechs) where enemy airships would land
+    //   3. sink the enemy navy off our coast (Amphibious Mechs)
+    //   4. cross the water and raid an overseas nation (Amphibious / Airborne)
+    //   5. assault whoever we are fighting on land
+    //   6. otherwise walk the border
+    const T = this.threat;
+    const crossesWater = R.mechCrossesWater(p);
+    const pool = [...live].filter((m) => !m.engaged && !m.refit).sort((a, b) => b.hp / b.maxHp - a.hp / a.maxHp);
+    const give = (m, mode, target = 0, tile = -1) => {
+      if (tile >= 0) { g.moveMech(p, m.id, tile); return; }       // moveMech also sets 'hold'
+      if (m.mode !== mode || m.orderTarget !== target) g.setMechMode(p, m.id, mode, target);
+    };
+    const take = (pred = () => true) => { const i = pool.findIndex(pred); return i < 0 ? null : pool.splice(i, 1)[0]; };
+    const healthy = (m) => m.hp > m.maxHp * 0.45;
+    // 1. defence
+    if (pressed) {
+      const want = Math.max(1, Math.ceil(live.length / 2));
+      for (let k = 0; k < want; k++) { const m = take(); if (m) give(m, 'defend'); }
+    }
+    // 2. airborne mechs guard the heart of the country against airdrops
+    if (R.mechAntiAir(p) && T.air > 0.5) {
+      const cities = p.unitsOf(UnitType.CITY);
+      if (cities.length) {
+        const cx = cities.reduce((a, u) => a + g.x(u.tile), 0) / cities.length, cy = cities.reduce((a, u) => a + g.y(u.tile), 0) / cities.length;
+        const spot = g.ref(Math.round(cx), Math.round(cy));
+        const m = take((mm) => g.dist(mm.patrol, spot) > 10);
+        if (m) give(m, 'hold', 0, g.isLand(spot) ? spot : cities[0].tile);
       }
-      if (m.mode !== mode || m.orderTarget !== orderTarget) g.setMechMode(p, m.id, mode, orderTarget);
-    });
+    }
+    // 3. amphibious mechs go after enemy warships near our coast: this is what the doctrine is for
+    if (R.mechAmphibious(p)) {
+      let hunt = null;
+      for (const t of this.shoreTiles(p, 40, true)) {
+        hunt = g.nearestEnemyShip(p, g.x(t), g.y(t), 55, false, true);
+        if (hunt) break;
+      }
+      if (hunt) { const m = take(healthy); if (m) give(m, 'hold', 0, g.tileAt(hunt.x, hunt.y)); }
+    }
+    // 4. raid across the water
+    if (raidTarget && crossesWater) {
+      const raiders = Math.max(1, Math.floor(pool.length / 2));
+      for (let k = 0; k < raiders; k++) { const m = take(healthy); if (m) give(m, 'assault', raidTarget.smallID); }
+    }
+    // 5 and 6
+    for (const m of pool) {
+      if (!healthy(m)) { give(m, 'defend'); continue; }
+      if (enemy && g.hostile(p, enemy) && (tanky || this.hardOrWorse || p.troops > enemy.troops)) give(m, 'assault', enemy.smallID);
+      else if (raidTarget && crossesWater) give(m, 'assault', raidTarget.smallID);
+      else give(m, 'roam');
+    }
   }
   nearOurLand(x, y, r) {
     const g = this.game, p = this.p;
@@ -772,17 +1044,27 @@ class NationAI {
     if (!g.airports(p).length) return false;
     if (g.liveAirships(p).length >= this.cfg.airshipCap(p)) return false;
     if (p.troops < this.cfg.maxTroops(p) * 0.4) return false;
-    this.airliftAfter = g.tick + 300;
+    this.airliftAfter = g.tick + 250;
     const victims = g.players.filter((o) => o !== p && o.alive && g.hostile(p, o) && o.numTiles > 60);
     if (!victims.length) return false;
-    // prefer whoever we are already fighting, else the weakest thing in range
-    victims.sort((a, b) => (a === this.currentEnemy ? -1 : b === this.currentEnemy ? 1 : a.troops - b.troops));
+    // Airships exist to crack SAM umbrellas: nations sitting behind SAMs come first, and the drop goes
+    // right onto the launchers (with SEAD that wipes them; without, the troops still overrun the tile).
+    const sams = (o) => o.units.filter((u) => u.type === UnitType.SAM && u.constructionLeft === 0).length;
+    victims.sort((a, b) => (sams(b) * 3 + (b === this.currentEnemy ? 5 : 0) + (this.grudge.get(b.smallID) || 0) / 20)
+      - (sams(a) * 3 + (a === this.currentEnemy ? 5 : 0) + (this.grudge.get(a.smallID) || 0) / 20));
     for (const v of victims.slice(0, 3)) {
+      const launchers = v.units.filter((u) => u.type === UnitType.SAM && u.constructionLeft === 0);
+      for (const sam of launchers) {
+        if (g.liveAirships(p).length >= this.cfg.airshipCap(p)) return true;
+        // land next to it rather than on it: the tile itself holds the building
+        const x = g.x(sam.tile) + this.rng.int(-2, 2), y = g.y(sam.tile) + this.rng.int(-2, 2);
+        if (g.valid(x, y) && g.launchAirship(p, g.ref(x, y)).ok) return true;
+      }
       let i = 0;
       for (const t of v.tiles) {
         if (i++ % 23) continue;
         if (i > 2000) break;
-        if (v.border.has(t)) continue;                       // inland, not the beach
+        if (v.border.has(t)) continue;
         if (g.liveAirships(p).length >= this.cfg.airshipCap(p)) return true;
         if (g.launchAirship(p, t).ok) return true;
       }
@@ -790,44 +1072,57 @@ class NationAI {
     return false;
   }
 
+
   // ---- nukes / bombers ------------------------------------------------------------------
   maybeNuke() {
     const g = this.game, p = this.p;
     if (g.settings.disableNukes || this.difficulty === Difficulty.EASY) return;
     if (this.difficulty === Difficulty.MEDIUM && !this.rng.chance(Math.max(1, Math.round(3 / this.nukeBias)))) return;
+    if (g.tick < (this.nukeAfter || 0)) return;
     const c = g.canLaunchNuke(p, NukeType.ATOM, p.spawnTile ?? 0);
     if (!c.ok && !c.reason.startsWith('Not enough')) return;
-    let type = NukeType.ATOM;
-    if (this.difficulty === Difficulty.IMPOSSIBLE && p.gold >= this.cfg.nukeCost(NukeType.HYDROGEN, p) * 1.5 && this.rng.chance(3)) type = NukeType.HYDROGEN;
-    const cost = this.cfg.nukeCost(type, p);
-    if (p.gold < cost * (1.3 / this.nukeBias)) return;
+    const cluster = p.researches.has('cluster_munitions');
+    const decoys = p.researches.has('decoy_warheads') || p.researches.has('hypersonic_missiles');
     let enemies = g.players.filter((o) => o !== p && o.alive && !p.isFriendly(o) && o.type !== PlayerType.BOT &&
-      (o.incomingAttacks.some((a) => a.attacker === p) || p.incomingAttacks.some((a) => a.attacker === o) || p.relation(o) <= -50));
+      (o.incomingAttacks.some((a) => a.attacker === p) || p.incomingAttacks.some((a) => a.attacker === o) || p.relation(o) <= -50 || (this.grudge.get(o.smallID) || 0) > 50));
     if (!enemies.length && this.hardOrWorse && p.troops > this.cfg.maxTroops(p) * 0.8) enemies = g.neighborsOf(p).players.filter((o) => !p.isFriendly(o) && o.type !== PlayerType.BOT);
     if (!enemies.length) return;
-    enemies.sort((a, b) => b.troops - a.troops);
+    // the one that has hurt us most, then the strongest
+    enemies.sort((a, b) => ((this.grudge.get(b.smallID) || 0) - (this.grudge.get(a.smallID) || 0)) || (b.troops - a.troops));
     const target = enemies[0];
     if (target.numTiles < 400) return;
-    const { outer } = this.cfg.nukeMagnitude(type, p);
-    let best = null, bestScore = 0;
-    for (let i = 0; i < 12; i++) {
+    // Look for the best-value spot, and count the SAMs that would get a shot at each. A bomb into an
+    // umbrella is a million gold thrown away; the counters are what make those spots worth hitting.
+    let best = null, bestScore = 0, bestCover = 0;
+    for (let i = 0; i < 16; i++) {
       const t = g.randomTileOf(target.tiles, this.rng);
       const cx = g.x(t), cy = g.y(t);
-      let enemyCount = 0, ownOrAlly = 0;
+      const { outer } = this.cfg.nukeMagnitude(NukeType.ATOM, p);
+      let value = 0, ownOrAlly = 0;
       const r = outer + 3;
       for (let y = Math.max(0, cy - r); y <= Math.min(g.height - 1, cy + r); y += 2) for (let x = Math.max(0, cx - r); x <= Math.min(g.width - 1, cx + r); x += 2) {
         const sm = g.owner[g.ref(x, y)];
         if (sm === 0) continue;
         const o = g.playersBySmall[sm];
-        if (o === p || p.isFriendly(o)) ownOrAlly++; else if (o === target) enemyCount++;
+        if (o === p || p.isFriendly(o)) ownOrAlly++; else if (o === target) value++;
       }
       if (ownOrAlly > 0) continue;
-      for (const u of target.units) if (Math.abs(g.x(u.tile) - cx) <= outer && Math.abs(g.y(u.tile) - cy) <= outer) enemyCount += 60;
-      if (enemyCount > bestScore) { bestScore = enemyCount; best = t; }
+      for (const u of target.units) if (Math.abs(g.x(u.tile) - cx) <= outer && Math.abs(g.y(u.tile) - cy) <= outer) value += u.type === UnitType.SAM ? 120 : 60;
+      const cover = this.samCoverPath(t);
+      // how much of the payload we expect to land
+      const land = cover === 0 ? 1 : cluster ? Math.max(0, (this.cfg.clusterCount() - cover) / this.cfg.clusterCount()) : decoys ? Math.pow(0.55, cover) : 0;
+      const score = value * land;
+      if (score > bestScore) { bestScore = score; best = t; bestCover = cover; }
     }
     if (best === null || bestScore < 40) return;
-    g.launchNuke(p, type, best);
+    // pick the weapon for that spot
+    let type = NukeType.ATOM;
+    if (bestCover > 0 && cluster) type = NukeType.CLUSTER;
+    else if (bestCover === 0 && this.difficulty === Difficulty.IMPOSSIBLE && p.gold >= this.cfg.nukeCost(NukeType.HYDROGEN, p) * 1.5 && this.rng.chance(3)) type = NukeType.HYDROGEN;
+    if (p.gold < this.cfg.nukeCost(type, p) * (1.3 / this.nukeBias)) return;
+    if (g.launchNuke(p, type, best).ok) this.nukeAfter = g.tick + NUKE_CADENCE[this.diffIndex] / this.nukeBias;
   }
+
   maybeBomb() {
     const g = this.game, p = this.p;
     if (!this.wantBombers || !p.researches.has('strategic_bombers')) return;
@@ -837,7 +1132,8 @@ class NationAI {
     const range = this.cfg.bomberRange();
     const targets = g.units.filter((u) => g.hostile(p, u.owner) && u.owner.type !== PlayerType.BOT && [UnitType.SILO, UnitType.SAM, UnitType.FACTORY, UnitType.CITY, UnitType.LAB, UnitType.PORT].includes(u.type) && silos.some((s) => g.dist(s.tile, u.tile) <= range));
     if (!targets.length) return;
-    const pri = { silo: 5, sam: 4, factory: 4, lab: 3, city: 2, port: 1 };
+    // with SEAD the air defences come first: that is what opens the sky for everything else
+    const pri = p.researches.has('sead_doctrine') ? { sam: 9, silo: 5, factory: 4, lab: 3, city: 2, port: 1 } : { silo: 5, sam: 4, factory: 4, lab: 3, city: 2, port: 1 };
     targets.sort((a, b) => (pri[b.type] || 0) - (pri[a.type] || 0));
     g.launchBomber(p, targets[0].tile);
   }

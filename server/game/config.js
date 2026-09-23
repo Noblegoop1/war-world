@@ -10,7 +10,7 @@ const STRUCTURE_TYPES = ['city', 'port', 'defense', 'silo', 'sam', 'lab', 'facto
 const { effects: R } = require('./research');
 // Structures that count as "population" (a nation's civilian centers). Labs & walls can't be built near these.
 const POPULATION_TYPES = ['city'];
-const NukeType = { ATOM: 'atom', HYDROGEN: 'hydrogen' };
+const NukeType = { ATOM: 'atom', HYDROGEN: 'hydrogen', CLUSTER: 'cluster' };
 const Difficulty = { EASY: 'easy', MEDIUM: 'medium', HARD: 'hard', IMPOSSIBLE: 'impossible' };
 
 const TICKS_PER_SECOND = 10;
@@ -77,6 +77,14 @@ const LARGE_DEFENDER_DEPTH = 0.3;
 const LARGE_ATTACKER_SPEED_DEPTH = 0.73;
 const BOT_DEFENDER_LOSS_MULT = 0.7;
 const TERRA_NULLIUS_COST_SCALE = 2000;
+// ---- economy (see passiveGold) ----
+const LAND_GOLD = 2.5;                                   // gold/tick per sqrt(tile)
+const CITY_GOLD_UNIT = 70;                               // gold/tick for a level-1 City
+const CITY_GOLD_BY_LEVEL = [0, 1, 2.2, 3.6, 6.5];        // multiples of the unit; level 4 is the big step
+const PEACE_DIVIDEND = 1.3;                              // passive gold multiplier while at peace
+const PEACE_DIVIDEND_TICKS = 900;                        // 90s since you last attacked a nation
+const CONQUEST_TREASURY_SHARE = 0.5;
+const ALLIED_TRADE_BONUS = 1.5;
 const TERRA_NULLIUS_MIN_COST = 5;
 const TERRA_NULLIUS_MAX_COST = 100;
 const ATTACKER_LOSS_BASE = 0.463;
@@ -118,7 +126,7 @@ class Config {
   // A post only shells ships if it can see the sea. Anything further inland than this is a land fort.
   defensePostCoastRange() { return 6; }
   // Coastal guns harass ships, they don't sink them: a fraction of a warship's health per shell.
-  defensePostShipDamage(player) { return Math.floor(this.warshipHp() * R.defensePostShipDamagePct(player)); }
+  defensePostShipDamage(player) { return this.warshipHp() * R.defensePostShipDamagePct(player); }
   samRange(player) { return 70 + R.samRangeBonus(player); }
   samCooldownTicks() { return 90; }
   siloCooldownTicks(player) { return Math.floor(90 * R.siloCooldownMultiplier(player)); }
@@ -127,8 +135,15 @@ class Config {
   boatSpeed(player) { return 2 * R.boatSpeed(player); } // tiles per tick along the path
   tradeShipSpeed() { return 1.2; }
   trainSpeed() { return 2.5; }
-  nukeSpeed() { return 6; } // tiles per tick along the arc
-  nukeMagnitude(type, player) { return type === NukeType.HYDROGEN ? { inner: 80, outer: 100 } : R.atomMagnitude(player); }
+  nukeSpeed(player) { return 6 * R.missileSpeedMultiplier(player); } // tiles per tick along the arc
+  // Cluster Strike: many small missiles instead of one big one, so SAMs (one kill per reload) saturate.
+  clusterCount() { return 8; }
+  clusterSpread() { return 20; }
+  nukeMagnitude(type, player) {
+    if (type === NukeType.HYDROGEN) return { inner: 80, outer: 100 };
+    if (type === 'bomblet') return { inner: 3, outer: 6 };
+    return R.atomMagnitude(player);
+  }
   // ---- warships / navy (OpenFront numbers) ----
   warshipHp() { return 1000; }
   warshipPatrolRange() { return 100; }
@@ -167,7 +182,7 @@ class Config {
   traitorSpeedDebuff() { return 0.75; }
   falloutDefenseModifier(ratio) { return 5 - ratio * 2; }
   // How long ground stays irradiated, in ticks. Long enough to matter, short enough that the map heals.
-  falloutDuration(type) { return type === 'hydrogen' ? 2400 : type === 'warhead' ? 700 : 1200; }
+  falloutDuration(type) { return type === 'hydrogen' ? 2400 : type === 'warhead' ? 700 : type === 'bomblet' ? 300 : 1200; }
   // Troops lost per tile of theirs that a blast erases, as a share of their standing army. OpenFront
   // applies a per-tile death factor like this; troops in transit die with the rest.
   nukeDeathFactor(troops, tilesOwned) { return (5 * troops) / Math.max(1, tilesOwned); }
@@ -260,6 +275,10 @@ class Config {
   mechStompRadius(player) { return 3 + R.mechStompBonus(player); }
   mechTroopKillPerShell(player, factoryLevel = 2) { return Math.floor(6000 * (1 + 0.3 * (factoryLevel - 2)) * R.mechDamageMultiplier(player)); }
   mechPatrolRadius() { return 6; }
+  // Against ships a mech is a harassing gun, unless it is an Amphibious mech built for exactly this.
+  mechShipDamage(player) { return R.mechAmphibious(player) ? 950 : 350; }
+  mechShipRangeMultiplier(player) { return R.mechAmphibious(player) ? 1.5 : 1; }
+  mechSubDetectRange() { return 30; }
   // ---- Artillery Battery: the static answer to a mech parked on your border ----
   artilleryRange(player) { return 45 + R.artilleryRangeBonus(player); }
   // A battery is a siege gun, not a machine gun: one shell every 45 seconds, but a direct hit takes a
@@ -288,6 +307,7 @@ class Config {
   airshipSpeed(player) { return 1.4 * R.airshipSpeedMultiplier(player); }
   airshipRange(player) { return 260 + R.airshipRangeBonus(player); }
   airshipHp() { return 1; }
+  seadRadius() { return 15; }
   interceptorRange(player) { return 60 + R.interceptorRangeBonus(player); }
   interceptorKillChance(player) { return 0.45 * R.interceptorChanceMultiplier(player); }
   // A mech anchors the ground around it, like a mobile defense post.
@@ -296,6 +316,7 @@ class Config {
   mechSpeedPenalty() { return 2; }
   nukeCost(type, player) {
     if (player && player.type === PlayerType.HUMAN && this.infiniteGold()) return 0;
+    if (type === NukeType.CLUSTER) return 1500000;
     return type === NukeType.HYDROGEN ? 5000000 : R.atomCost(player);
   }
 
@@ -338,10 +359,35 @@ class Config {
     toAdd *= R.troopGrowthMultiplier(player, player.connectedFactories || 0);
     return Math.min(player.troops + toAdd, max) - player.troops;
   }
-  goldAdditionRate(player, attacking = false) {
-    return (player.type === PlayerType.BOT ? 50 : 100) * R.goldMultiplier(player, attacking);
+  // Passive income, split into the parts the HUD shows. The flat base is OpenFront's; on top of it:
+  //   land   - grows with the square root of territory, so ten times the land is ~three times the gold
+  //   cities - every City pays by level, which is what makes building an actual investment
+  // Tribes stay poor on purpose. Everything here is gold per tick.
+  passiveGold(player) {
+    if (player.type === PlayerType.BOT) return { base: 50, land: 0, cities: 0 };
+    let cities = 0;
+    for (const u of player.units) if (u.type === UnitType.CITY && u.constructionLeft === 0) cities += CITY_GOLD_BY_LEVEL[Math.min(u.level, CITY_GOLD_BY_LEVEL.length - 1)];
+    return { base: 100, land: LAND_GOLD * Math.sqrt(player.numTiles), cities: cities * CITY_GOLD_UNIT };
+  }
+  // Not having started a war with another nation for a while pays: the turtle's income bonus.
+  isAtPeace(player, tick) { return tick - (player.lastOffenseTick ?? -1e9) >= PEACE_DIVIDEND_TICKS; }
+  goldAdditionRate(player, attacking = false, tick = 0) {
+    const g = this.passiveGold(player);
+    let rate = (g.base + g.land + g.cities) * R.goldMultiplier(player, attacking);
+    if (player.type !== PlayerType.BOT && this.isAtPeace(player, tick)) rate *= PEACE_DIVIDEND;
+    return rate;
   }
   // Gold each side earns when a trade ship arrives, by sailing distance.
+  alliedTradeBonus() { return ALLIED_TRADE_BONUS; }
+  cityGold(level) { return CITY_GOLD_BY_LEVEL[Math.min(level, CITY_GOLD_BY_LEVEL.length - 1)] * CITY_GOLD_UNIT; }   // per tick
+  // Ships take their port's level: tougher and harder-hitting per level.
+  warshipMaxHp(level = 1) { return Math.round(this.warshipHp() * (1 + 0.35 * (level - 1))); }
+  warshipDamageMultiplier(level = 1) { return 1 + 0.25 * (level - 1); }
+  submarineMaxHp(level = 1) { return Math.round(this.submarineHp() * (1 + 0.35 * (level - 1))); }
+  // A better-equipped lab thinks faster, but not so fast that a doctrine arrives in seconds.
+  labSpeedMultiplier(level = 1) { return [1, 1, 0.8, 0.65][Math.min(level, 3)]; }
+  labUpgradeCost(level) { return 1500000 * level; }
+  peaceDividendMultiplier() { return PEACE_DIVIDEND; }
   tradeShipGold(dist) {
     const debuff = 300;
     return Math.floor(75000 / (1 + Math.exp(-0.03 * (dist - debuff))) + 50 * dist);
@@ -394,9 +440,10 @@ class Config {
   }
   // OpenFront: conquering an AI takes its whole treasury, a human half of it. We add a land bounty
   // so swallowing a big nation pays a good chunk.
+  // Half the loser's treasury, whoever they were. Taking an AI's whole purse made eating neighbours
+  // the only real economy; the land bounty still makes a big conquest pay.
   conquerGoldAmount(captured) {
-    const treasury = captured.type === PlayerType.HUMAN ? Math.floor(captured.gold * 0.5) : Math.floor(captured.gold);
-    return treasury + 10000 + captured.numTiles * 15;
+    return Math.floor(captured.gold * CONQUEST_TREASURY_SHARE) + 10000 + captured.numTiles * 15;
   }
   nationAttackRate(rng) {
     switch (this.difficulty()) {

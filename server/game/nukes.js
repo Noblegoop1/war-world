@@ -12,6 +12,7 @@ module.exports = {
     if (!p.alive) return { ok: false, reason: 'dead' };
     if (this.settings.disableNukes) return { ok: false, reason: 'Nukes are disabled' };
     if (!Object.values(NukeType).includes(type)) return { ok: false, reason: 'bad type' };
+    if (type === NukeType.CLUSTER && !R.clusterMunitions(p)) return { ok: false, reason: 'Cluster Strikes need the Cluster Munitions research' };
     if (!this.isLand(tile)) return { ok: false, reason: 'Target must be land' };
     const cost = this.config.nukeCost(type, p);
     if (p.gold < cost) return { ok: false, reason: `Not enough gold (need ${Math.floor(cost).toLocaleString()})` };
@@ -30,7 +31,19 @@ module.exports = {
     p.removeGold(c.cost);
     if (c.launcher.kind === 'submarine') c.launcher.nukeReady = this.tick + 900;
     else { c.launcher.cooldown = this.config.siloCooldownTicks(p); this.unitsChanged = true; }
-    this.spawnNuke(p, type, c.from.x, c.from.y, this.x(tile), this.y(tile), tile);
+    if (type === NukeType.CLUSTER) {
+      // Eight separate missiles, each its own target for a SAM. That is the whole idea: a SAM kills one
+      // missile per reload, so a volley gets most of its load through a defence that stops any single bomb.
+      const cx = this.x(tile), cy = this.y(tile), spread = this.config.clusterSpread();
+      for (let i = 0; i < this.config.clusterCount(); i++) {
+        const ang = (i / this.config.clusterCount()) * Math.PI * 2 + this.rng.next() * 0.6;
+        const d = i === 0 ? 0 : this.rng.int(4, spread);
+        const tx = Math.max(0, Math.min(this.width - 1, Math.round(cx + Math.cos(ang) * d)));
+        const ty = Math.max(0, Math.min(this.height - 1, Math.round(cy + Math.sin(ang) * d)));
+        const b = this.spawnNuke(p, 'bomblet', c.from.x, c.from.y, tx, ty, this.ref(tx, ty));
+        b.arc = bezierArc(c.from.x + 0.5, c.from.y + 0.5, tx + 0.5, ty + 0.5, 25 + i * 3);  // fan the arcs out
+      }
+    } else this.spawnNuke(p, type, c.from.x, c.from.y, this.x(tile), this.y(tile), tile);
     this.events.push({ k: 'nuke', type, by: p.smallID, tile, target: this.owner[tile] });
     return c;
   },
@@ -42,9 +55,9 @@ module.exports = {
   },
   tickNukes() {
     if (!this.nukes.length) return;
-    const speed = this.config.nukeSpeed();
     for (const nk of this.nukes) {
       if (nk.done) continue;
+      const speed = this.config.nukeSpeed(nk.owner);
       // SAM interception (only real nukes; MIRV warheads too)
       let intercepted = false;
       for (const u of this.units) {
@@ -53,10 +66,13 @@ module.exports = {
         const dx = this.x(u.tile) - nk.x, dy = this.y(u.tile) - nk.y;
         const r = this.config.samRange(u.owner);
         if (dx * dx + dy * dy <= r * r) {
-          u.cooldown = this.config.samCooldownTicks();
+          // Hypersonic missiles tie the SAM up for longer even when it scores.
+          u.cooldown = this.config.samCooldownTicks() * R.samReloadPenalty(nk.owner);
           this.unitsChanged = true;
+          // Decoy Warheads: the SAM spends its shot on a decoy and the real missile flies on.
+          if (this.rng.next() < R.decoyChance(nk.owner)) { this.events.push({ k: 'decoy', by: u.owner.smallID, x: nk.x, y: nk.y }); break; }
           intercepted = true;
-          this.events.push({ k: 'samhit', by: u.owner.smallID, x: nk.x, y: nk.y });
+          this.events.push({ k: 'samhit', by: u.owner.smallID, vs: nk.owner.smallID, x: nk.x, y: nk.y });
           break;
         }
       }
@@ -90,6 +106,7 @@ module.exports = {
   },
   detonate(nk, isWarhead = false) {
     const { inner, outer } = nk.type === 'warhead' ? { inner: 12, outer: 18 } : this.config.nukeMagnitude(nk.type, nk.owner);
+    const small = nk.type === 'bomblet';
     const cx = nk.tx, cy = nk.ty;
     // MIRV: a hydrogen bomb splits into 5 atom-sized warheads instead of one big blast
     if (nk.type === NukeType.HYDROGEN && nk.owner.researches.has('mirv') && !isWarhead) {
@@ -143,9 +160,10 @@ module.exports = {
     for (const m of this.mechs) {
       if (m.done) continue;
       const d = Math.hypot(m.x - cx, m.y - cy);
+      if (small) { if (d <= outer) m.hp -= m.maxHp * 0.08; continue; }
       if (d <= inner) m.hp = 0; else if (d <= outer) m.hp -= m.maxHp * (1 - (d - inner) / (outer - inner)) * 0.8;
     }
-    for (const list of [this.warships, this.subs, this.boats, this.tradeShips]) for (const s of list) { if (s.done) continue; if (Math.hypot(s.x - cx, s.y - cy) <= outer) this.damageShip(s, 5000, nk.owner); }
+    for (const list of [this.warships, this.subs, this.boats, this.tradeShips]) for (const s of list) { if (s.done) continue; if (Math.hypot(s.x - cx, s.y - cy) <= outer) this.damageShip(s, small ? 250 : 5000, nk.owner); }
     this.events.push({ k: 'boom', type: nk.type, x: cx, y: cy, by: nk.owner.smallID });
   },
 
@@ -187,7 +205,9 @@ module.exports = {
       // Fighter Networks: each second over a defended nation's land, 60%/5 chance of being shot down (~60% over a crossing)
       const o = this.ownerOf(this.tileAt(b.x, b.y));
       if (o && o !== b.checkedOwner) b.checkedOwner = o;
-      if (o && this.hostile(b.owner, o) && o.researches.has('fighter_networks') && this.tick % 10 === 0 && this.rng.next() < 0.18) {
+      const tgt = this.unitAt(b.targetTile);
+      const immune = R.sead(b.owner) && tgt && tgt.type === UnitType.SAM;
+      if (!immune && o && this.hostile(b.owner, o) && o.researches.has('fighter_networks') && this.tick % 10 === 0 && this.rng.next() < 0.18) {
         b.done = true;
         this.events.push({ k: 'bomberDown', by: o.smallID, x: b.x, y: b.y });
       }

@@ -280,6 +280,22 @@ class Lobby {
         if (!r.ok) c.send({ t: 'toast', msg: r.reason });
         break;
       }
+      case 'inspect': {
+        const q = { kind: String(m.kind || ''), id: Number(m.id) || 0, tile: tile ?? -1 };
+        c.send({ t: 'inspect', q, info: g.inspect(p, q) });
+        break;
+      }
+      case 'refit': {
+        const r = g.refitUnit(p, String(m.kind || ''), Number(m.id) || 0);
+        c.send({ t: 'toast', msg: r.ok ? (r.cancelled ? 'Refit cancelled' : 'Heading home for a refit') : r.reason, info: r.ok });
+        break;
+      }
+      case 'recall': {
+        if (tile === null) return;
+        const r = g.recallForRefit(p, tile);
+        c.send({ t: 'toast', msg: r.ok ? `${r.count} unit${r.count > 1 ? 's' : ''} recalled for refit` : r.reason, info: r.ok });
+        break;
+      }
       case 'mechMode': {
         const r = g.setMechMode(p, Number(m.id) || 0, String(m.mode), Number(m.target) || 0);
         if (!r.ok) c.send({ t: 'toast', msg: r.reason });

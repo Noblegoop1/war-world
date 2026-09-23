@@ -49,6 +49,21 @@ function toast(msg, info = false) {
   setTimeout(() => el.remove(), 3000);
 }
 function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
+// Research effect markup from the server: {text|g} good for the owner, {text|r} a cost to the owner,
+// {text|p} something done to other nations, {text|b} just bold. Everything else is escaped.
+function fxMarkup(str) {
+  return esc(str || '').replace(/\{([^|{}]+)\|([grpb])\}/g, (_, t, c) => `<b class="fx-${c}">${t}</b>`);
+}
+function showTip(html, x, y) {
+  const t = $('tip');
+  t.innerHTML = html;
+  t.classList.remove('hidden');
+  const w = t.offsetWidth, h = t.offsetHeight;
+  t.style.left = `${clamp(x + 14, 6, window.innerWidth - w - 6)}px`;
+  t.style.top = `${clamp(y - h - 10, 6, window.innerHeight - h - 6)}px`;
+}
+function hideTip() { $('tip').classList.add('hidden'); }
+function fmtClock(ticks) { const sec = Math.max(0, Math.ceil(ticks / 10)); return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`; }
 
 // =============================================================================
 // Assets (OpenFront icons/sprites, CC BY-SA 4.0)
@@ -154,12 +169,13 @@ const UNIT_INFO = {
   bomber: { label: 'Bomber Strike', key: '', desc: 'Click an enemy structure within 250 tiles of your silo: a bomber flies over and destroys it. Fighter Networks can shoot it down.', cost: () => 300000, needs: 'strategic_bombers' },
 };
 const NUKE_INFO = {
+  cluster: { label: 'Cluster Strike', key: '', desc: 'Eight small missiles fired at once, scattering over ~20 tiles. A SAM stops one missile per reload, so a volley gets most of its load through an umbrella that would swallow a single bomb.', cost: 1500000, needs: 'cluster_munitions' },
   atom: { label: 'Atom Bomb', key: 'N', desc: 'Lobbed from your nearest silo. Destroys everything within 12 tiles, most within 30. SAMs can intercept it.', cost: 750000 },
   hydrogen: { label: 'Hydrogen Bomb', key: 'H', desc: 'Destroys everything within 80 tiles, most within 100.', cost: 5000000 },
 };
 const HOTBAR = ['city', 'port', 'factory', 'defense', 'silo', 'sam', 'lab', 'wall', 'mech', 'warship'];
-const HOTBAR2 = ['artillery', 'repair', 'airport', 'airship', 'atom', 'hydrogen', 'submarine', 'mine', 'bomber'];
-const ICON_FOR = { city: 'city', port: 'port', factory: 'factory', defense: 'defense', silo: 'silo', sam: 'sam', lab: 'info', wall: 'build', mech: 'target', warship: 'warship', submarine: 'warship', mine: 'mine', bomber: 'explosion', atom: 'atom', hydrogen: 'hydrogen', artillery: 'sword', repair: 'troops', airport: 'airport', airship: 'airship' };
+const HOTBAR2 = ['artillery', 'repair', 'airport', 'airship', 'atom', 'hydrogen', 'cluster', 'submarine', 'mine', 'bomber'];
+const ICON_FOR = { city: 'city', port: 'port', factory: 'factory', defense: 'defense', silo: 'silo', sam: 'sam', lab: 'info', wall: 'build', mech: 'target', warship: 'warship', submarine: 'warship', mine: 'mine', bomber: 'explosion', atom: 'atom', hydrogen: 'hydrogen', cluster: 'explosion', artillery: 'sword', repair: 'troops', airport: 'airport', airship: 'airship' };
 let RESEARCH_DEFS = [];
 
 // =============================================================================
@@ -198,6 +214,7 @@ function handleMessage(m) {
     case 'tick': applyTick(m); break;
     case 'ctl': G.ctl = { paused: m.paused, speed: m.speed }; renderTopRight(); break;
     case 'wallQuote': if (wallDraw) wallDraw.quote = m; break;
+    case 'inspect': renderInspect(m); break;
     case 'ended': G.active = false; show('lobby'); if (lobby) renderLobby(); break;
     default: break;
   }
@@ -498,6 +515,7 @@ function applyStats(stats) {
     if (!p) continue;
     p.troops = s[1]; p.gold = s[2]; p.tiles = s[3]; p.flags = s[4]; p.maxTroops = s[5]; p.allies = s[6] || []; p.income = s[7] || 0;
     const r = s[8] || [[], null, null];
+    p.income2 = s[19] || null;   // [base, land, cities, peace, trade, train, conquest, plunder] per second
     p.researches = r[0] || []; p.researching = r[1]; p.choices = r[2];
     p.atk = s[9] || 0; p.eco = s[10] || 0; p.walls = s[11] || 0; p.mechCount = s[12] || 0; p.warshipCount = s[13] || 0; p.subCount = s[14] || 0;
     p.deployed = s[15] || 0; p.airships = s[16] || 0; p.airshipsBuilt = s[17] || 0; p.maxResearch = s[18] || 2;
@@ -554,6 +572,10 @@ function handleEvent(e) {
     case 'nuke': logEvent(`☢ ${esc(pname(e.by))} launched a${e.type === 'hydrogen' ? ' hydrogen' : 'n atom'} bomb${e.target ? ' at ' + esc(pname(e.target)) : ''}`, mine(e.target) ? 'bad' : ''); break;
     case 'boom': G.effects.push({ x: e.x, y: e.y, r: e.type === 'hydrogen' ? 100 : e.type === 'warhead' ? 18 : 30, t0: performance.now(), dur: 1800 }); break;
     case 'mirvSplit': logEvent('A MIRV split into warheads!', 'bad'); break;
+    case 'decoy': logEvent(`${esc(pname(e.by))}'s SAM was fooled by a decoy`, mine(e.by) ? 'bad' : ''); G.effects.push({ x: e.x, y: e.y, r: 5, t0: performance.now(), dur: 600, ring: true }); break;
+    case 'refitStart': if (mine(e.p)) logEvent(`A ${e.kind} is heading home to refit to level ${e.level}`); break;
+    case 'refitDone': if (mine(e.p)) logEvent(`${e.kind === 'mech' ? 'Mech' : e.kind === 'warship' ? 'Warship' : 'Submarine'} refitted to <b>level ${e.level}</b>`, 'good'); break;
+    case 'refitCancelled': if (mine(e.p)) logEvent(`Refit cancelled: ${esc(e.why || '')}`, 'bad'); break;
     case 'samhit': logEvent(`${esc(pname(e.by))}'s SAM shot down a nuke`, mine(e.by) ? 'good' : ''); G.effects.push({ x: e.x, y: e.y, r: 8, t0: performance.now(), dur: 700 }); break;
     case 'allyRequest': break;
     case 'allyRejected': logEvent(`${esc(pname(e.by))} rejected your alliance request`); break;
@@ -665,7 +687,15 @@ function renderHud() {
   const dep = $('cp-troops-out');
   dep.style.left = `${homePct}%`;
   dep.style.width = `${outPct}%`;
-  $('cp-gold').textContent = fmt(p.gold);
+  $('cp-gold-amt').textContent = fmt(p.gold);
+  const gi = p.income2;
+  if (gi) {
+    const total = gi[0] + gi[1] + gi[2] + gi[4] + gi[5] + gi[6] + gi[7];
+    const rate = $('cp-gold-rate');
+    rate.textContent = `+${fmt(total)}/s`;
+    rate.classList.toggle('peace', !!gi[3]);
+  }
+  renderResearchPanel();
   $('ratio-label').textContent = `⚔ ${Math.round(ratio * 100)}% (${fmt(p.troops * ratio)})`;
   renderLeaderboard();
   renderAttacks();
@@ -684,6 +714,28 @@ function renderLeaderboard() {
     return `<tr class="${q === p ? 'me' : ''} ${q.alive ? '' : 'dead'}" data-sm="${q.sm}"><td>${i}</td><td>${flagBadge(q)}</td><td>${esc(q.name)}${marks}</td><td>${(100 * q.tiles / G.numLand).toFixed(1)}%</td><td>${fmt(q.troops)}</td><td>${fmt(q.gold)}</td></tr>`;
   }).join('');
   $('leaderboard').querySelectorAll('tr[data-sm]').forEach((tr) => { tr.onclick = () => { const sm = Number(tr.dataset.sm); pinnedCard = sm; renderPlayerCard(sm, true); centerOn(sm); }; });
+}
+function renderResearchPanel() {
+  const p = me(), el = $('research-panel');
+  if (!p || !p.researching) { el.classList.add('hidden'); return; }
+  const [id, left, total] = p.researching;
+  const done = total ? clamp(1 - left / total, 0, 1) : 0;
+  el.innerHTML = `<div class="rp-row"><span>🔬 <b>${esc(researchName(id))}</b></span><span class="rp-time">${fmtClock(left)}</span></div><div class="rp-bar"><div style="width:${(done * 100).toFixed(1)}%"></div></div>`;
+  el.classList.remove('hidden');
+  const def = RESEARCH_DEFS.find((x) => x.id === id);
+  el.onmousemove = (e) => def && showTip(`<div class="tip-h">${esc(def.name)}</div><div>${fxMarkup(def.short)}</div>`, e.clientX, e.clientY);
+  el.onmouseleave = hideTip;
+}
+// Where your gold comes from, on hover over the gold box.
+function goldTipHtml(p) {
+  const inc = p.income2;
+  if (!inc) return '';
+  const rows = [['Base', inc[0]], ['Land', inc[1]], ['Cities', inc[2]], ['Trade ships', inc[4]], ['Trains', inc[5]], ['Conquest', inc[6]], ['Plunder', inc[7]]].filter(([, v]) => v > 0);
+  const total = rows.reduce((a, [, v]) => a + v, 0);
+  return `<div class="tip-h">Income +${fmt(total)}/s</div>`
+    + (inc[3] ? '<div class="tip-sub"><b class="fx-g">Peace dividend ×1.3</b> on base, land and cities — you haven\u2019t attacked a nation in 90s</div>' : '<div class="tip-sub">Stop attacking nations for 90s to earn a <b class="fx-g">×1.3</b> peace dividend</div>')
+    + `<table>${rows.map(([k, v]) => `<tr><td>${k}</td><td>+${fmt(v)}/s</td></tr>`).join('')}</table>`
+    + '<div class="tip-sub" style="margin-top:4px">Cities pay more every level; land pays by its square root.</div>';
 }
 function renderAttacks() {
   const out = G.attacks.filter((a) => a[1] === G.me);
@@ -713,6 +765,7 @@ function itemCost(key) {
   if (key === 'submarine') return UNIT_INFO.submarine.cost(p ? p.subCount || 0 : 0) * disc;
   if (key === 'atom') return myHas('tactical_nukes') ? 400000 : 750000;
   if (key === 'hydrogen') return NUKE_INFO.hydrogen.cost;
+  if (key === 'cluster') return NUKE_INFO.cluster.cost;
   if (key === 'port' || key === 'factory') return UNIT_INFO[key].cost(myUnitCount('port') + myUnitCount('factory')) * disc;
   return (UNIT_INFO[key] ? UNIT_INFO[key].cost(myUnitCount(key)) : 0) * disc;
 }
@@ -722,7 +775,7 @@ function itemAvailable(key) {
   const info = UNIT_INFO[key] || NUKE_INFO[key];
   if (info && info.needs && !myHas(info.needs)) return false;
   const nukesOff = G.settings && G.settings.disableNukes;
-  if (nukesOff && ['silo', 'sam', 'atom', 'hydrogen', 'bomber'].includes(key)) return false;
+  if (nukesOff && ['silo', 'sam', 'atom', 'hydrogen', 'cluster', 'bomber'].includes(key)) return false;
   if (G.settings && G.settings.disableBoats && ['warship', 'submarine', 'mine'].includes(key)) return false;
   return true;
 }
@@ -734,7 +787,7 @@ function itemCan(key) {
   if (key === 'lab' && (myUnitCount('city') < 3 || (p.researches.length + (p.researching ? 1 : 0) >= 2))) return false;
   if (key === 'mech' && !haveLevel2Factory()) return false;
   if ((key === 'warship' || key === 'submarine') && !havePort()) return false;
-  if ((key === 'atom' || key === 'hydrogen') && !haveReadySilo()) return false;
+  if ((key === 'atom' || key === 'hydrogen' || key === 'cluster') && !haveReadySilo()) return false;
   if (key === 'bomber' && !myUnitCount('silo')) return false;
   if (key === 'airship' && !myUnitCount('airport')) return false;
   if (key === 'airport' && myUnitCount('airport') >= 1) return false;
@@ -814,7 +867,7 @@ function playerCardHtml(sm) {
   if (q.subCount && (q.sm === G.me || (p && p.allies.includes(q.sm)))) uhtml += `<span title="Submarines">🌊 ${q.subCount} sub</span>`;
   if (q.walls) uhtml += `<span title="Wall tiles"><img src="${iconURL.build || ''}" alt="">${q.walls} wall</span>`;
   if (uhtml) html += `<div class="pc-units">${uhtml}</div>`;
-  const rs = (q.researches || []).map((id) => `<span class="rs done" title="${esc((RESEARCH_DEFS.find((r) => r.id === id) || {}).desc || '')}">${esc(researchName(id))}</span>`).join('');
+  const rs = (q.researches || []).map((id) => `<span class="rs done" data-rid="${esc(id)}">${esc(researchName(id))}</span>`).join('');
   const rp = q.researching ? `<span class="rs prog">${esc(researchName(q.researching[0]))} · ${Math.ceil(q.researching[1] / 10)}s</span>` : '';
   if (rs || rp) html += `<div class="pc-research">🔬 ${rs}${rp}</div>`;
   if (p && p.alive && q.alive && p.sm !== sm) {
@@ -832,6 +885,12 @@ function renderPlayerCard(sm, pinned) {
   card.style.position = 'relative';
   card.classList.remove('hidden');
   card.querySelectorAll('button[data-act]').forEach((b) => { b.onclick = () => playerAction(sm, b.dataset.act); });
+  card.querySelectorAll('.rs[data-rid]').forEach((el) => {
+    const def = RESEARCH_DEFS.find((r) => r.id === el.dataset.rid);
+    if (!def) return;
+    el.onmousemove = (e) => showTip(`<div class="tip-h">${esc(def.name)}</div><div>${fxMarkup(def.short)}</div>`, e.clientX, e.clientY);
+    el.onmouseleave = hideTip;
+  });
 }
 function playerAction(sm, act) {
   const p = me();
@@ -889,9 +948,10 @@ function openResearchPicker(choices) {
   const cards = choices.map((id) => {
     const r = RESEARCH_DEFS.find((x) => x.id === id) || { id, name: id, desc: '', tags: [] };
     const tag = (r.tags && r.tags[0]) || 'misc';
-    return `<div class="rcard tag-${tag}" data-id="${esc(id)}"><div class="rcard-tag">${esc(r.tags.join(' · ').toUpperCase())}</div><div class="rcard-name">${esc(r.name)}</div><div class="rcard-desc">${esc(r.desc)}</div><button class="primary">Research</button></div>`;
+    const mins = [0, 3, 4, 5][r.tier || 2];
+    return `<div class="rcard tag-${tag}" data-id="${esc(id)}"><div class="rcard-tag">${esc(r.tags.join(' · ').toUpperCase())}</div><div class="rcard-name">${esc(r.name)}</div><div class="rcard-short">${fxMarkup(r.short)}</div><div class="rcard-desc">${esc(r.desc)}</div><div class="rcard-time">~${mins} min at a level-1 lab</div><button class="primary">Research</button></div>`;
   }).join('');
-  el.innerHTML = `<div class="rp-inner"><div class="rp-head"><h2>Choose a Doctrine</h2><span class="muted">Takes 60s. You get 2 researches per game.</span></div><div class="rp-cards">${cards}</div><div class="muted small-text">Press Esc to decide later — the lab keeps the offer open (right-click your land → Research!).</div></div>`;
+  el.innerHTML = `<div class="rp-inner"><div class="rp-head"><h2>Choose a Doctrine</h2><span class="muted">Doctrines take 3–5 minutes (less in an upgraded lab). Each lab you own gives two.</span></div><div class="rp-cards">${cards}</div><div class="muted small-text">Press Esc to decide later — the lab keeps the offer open (right-click your land → Research!).</div></div>`;
   el.querySelectorAll('.rcard').forEach((c) => { c.onclick = () => { send({ t: 'research', id: c.dataset.id }); closeResearchPicker(); toast(`Researching ${researchName(c.dataset.id)}…`, true); }; });
   el.classList.remove('hidden');
 }
@@ -934,6 +994,46 @@ const MECH_MODES = [
   { id: 'assault', icon: 'sword', label: 'Auto-assault…', desc: 'March into one nation and keep wrecking whatever comes in range. Pick the nation next.' },
 ];
 function mechById(id) { return G.mechs.find((m) => m[0] === id); }
+// ---- Info panel: the server computes the numbers, we just lay them out and refresh ----
+let inspectQuery = null, inspectTimer = null;
+function openInspect(q) {
+  inspectQuery = q;
+  send({ t: 'inspect', ...q });
+  clearInterval(inspectTimer);
+  inspectTimer = setInterval(() => { if (inspectQuery) send({ t: 'inspect', ...inspectQuery }); }, 1000);
+}
+function closeInspect() { inspectQuery = null; clearInterval(inspectTimer); $('inspect-panel').classList.add('hidden'); }
+function renderInspect(msg) {
+  if (!inspectQuery || JSON.stringify(msg.q.kind) !== JSON.stringify(inspectQuery.kind)) return;
+  const el = $('inspect-panel');
+  if (!msg.info) { el.innerHTML = '<div class="ip-head"><span class="ip-title">Gone</span><button class="icon-btn" id="ip-close">✕</button></div><div class="muted">It no longer exists.</div>'; }
+  else {
+    const i = msg.info;
+    el.innerHTML = `<div class="ip-head"><div><div class="ip-title">${esc(i.title)}</div><div class="ip-sub">${esc(i.sub || '')}</div></div><button class="icon-btn" id="ip-close">✕</button></div>`
+      + `<table>${i.rows.map(([k, v, tone]) => `<tr><td>${esc(k)}</td><td class="${tone || ''}">${esc(v)}</td></tr>`).join('')}</table>`;
+  }
+  el.classList.remove('hidden');
+  $('ip-close').onclick = closeInspect;
+}
+function openShipRadial(ship, sx, sy) {
+  const s = G.ships.find((x) => x[0] === ship.id);
+  if (!s) return;
+  const lvl = s[10] || 1, refitting = !!s[11];
+  const items = [
+    { icon: 'info', label: 'Info', onClick: () => { closeRadial(); openInspect({ kind: ship.kind, id: ship.id }); } },
+    { icon: 'build', label: refitting ? 'Cancel refit' : 'Refit at port', title: 'Sail home and refit up to your best Port\u2019s level (30s in the yard, fully repaired)', onClick: () => { closeRadial(); send({ t: 'refit', kind: ship.kind, id: ship.id }); } },
+    { icon: 'x', label: 'Move', onClick: () => { closeRadial(); selected = ship; toast('Click water to send it there', true); } },
+  ];
+  radialItems(items, { html: `<b>${ship.kind === 'warship' ? 'Warship' : 'Sub'} L${lvl}</b><span class="muted">${refitting ? 'refitting' : fmt(s[5]) + ' HP'}</span>` }, sx, sy);
+}
+// Anyone's unit near a screen point (for Info on enemy units), mechs first.
+function nearestAnyMobileAt(sx, sy, maxPx = PICK_RADIUS_PX) {
+  let best = null, bd = maxPx * maxPx;
+  const test = (kind, id, wx, wy) => { const x = cam.x + wx * cam.zoom, y = cam.y + wy * cam.zoom; const d = (x - sx) ** 2 + (y - sy) ** 2; if (d < bd) { bd = d; best = { kind, id }; } };
+  for (const m of G.mechs) test('mech', m[0], m[2], m[3]);
+  for (const s of G.ships) test(s[1], s[0], s[3], s[4]);
+  return best;
+}
 function openMechRadial(mech, sx, sy) {
   const id = mech[0], mode = mech[9 + 2] || 'hold';
   const items = MECH_MODES.map((m) => ({
@@ -949,6 +1049,8 @@ function openMechRadial(mech, sx, sy) {
   }));
   items.push({ icon: 'troops', label: 'All mechs: this order', title: 'Apply the order you pick next to every mech you own', onClick: () => { closeRadial(); placement = { kind: 'allMechs' }; toast('Right-click any mech and pick an order — it will apply to all of them', true); } });
   items.push({ icon: 'x', label: 'Move here instead', onClick: () => { closeRadial(); selected = { kind: 'mech', id }; toast('Click where it should go', true); } });
+  items.push({ icon: 'info', label: 'Info', onClick: () => { closeRadial(); openInspect({ kind: 'mech', id }); } });
+  items.push({ icon: 'factory', label: mech[13] ? 'Cancel refit' : 'Refit', title: 'Walk home to your best Factory and refit up to its level (30s, fully repaired)', onClick: () => { closeRadial(); send({ t: 'refit', kind: 'mech', id }); } });
   const cur = MECH_MODES.find((m) => m.id === mode);
   radialItems(items, { html: `<b>Mech L${mech[7]}</b><span class="muted">${esc(cur ? cur.label : mode)}</span>` }, sx, sy);
 }
@@ -971,6 +1073,14 @@ function openRadial(tile, sx, sy) {
   // your own mech under the cursor takes priority over whatever tile it is standing on
   const own = nearestOwnMobileAt(sx, sy);
   if (own && own.kind === 'mech') { const m = mechById(own.id); if (m) return openMechRadial(m, sx, sy); }
+  if (own && (own.kind === 'warship' || own.kind === 'submarine')) return openShipRadial(own, sx, sy);
+  // someone else's unit: all you can do is look at it
+  const theirs = nearestAnyMobileAt(sx, sy);
+  if (theirs) {
+    radialItems([{ icon: 'info', label: 'Info', onClick: () => { closeRadial(); openInspect({ kind: theirs.kind, id: theirs.id }); } }],
+      { html: `<b>${theirs.kind === 'mech' ? 'Mech' : theirs.kind === 'warship' ? 'Warship' : 'Submarine'}</b><span class="muted">enemy</span>` }, sx, sy);
+    return;
+  }
   const o = G.owner[tile];
   const q = o ? G.players.get(o) : null;
   const land = isLand(tile);
@@ -981,7 +1091,14 @@ function openRadial(tile, sx, sy) {
   const center = { html: `<b>${esc(u ? unitLabel(u) : ownerName)}</b><span class="muted">${u ? esc(ownerName) : q ? fmt(q.troops) + ' troops' : land ? 'land' : ''}</span>` };
   if (o === G.me && land) {
     items.push({ icon: 'build', label: 'Build', cls: 'build', onClick: () => openBuildRadial(tile, sx, sy) });
-    if (u && (u[1] === 'city' || u[1] === 'port' || u[1] === 'factory')) items.push({ icon: ICON_FOR[u[1]], label: `Upgrade ${u[1] === 'factory' && u[4] === 1 ? '(unlocks Mechs)' : ''}`, cost: itemCost(u[1]), onClick: () => { send({ t: 'build', unit: u[1], tile }); closeRadial(); } });
+    if (u && (u[1] === 'city' || u[1] === 'port' || u[1] === 'factory' || u[1] === 'lab')) {
+      const maxLv = 3 + ((u[1] === 'city' && myHas('megacity')) || (u[1] === 'factory' && myHas('heavy_industry')) ? 1 : 0);
+      const atMax = u[4] >= maxLv;
+      const label = atMax ? `Max level (${u[4]})` : u[1] === 'factory' && u[4] === 1 ? 'Upgrade (unlocks Mechs)' : u[1] === 'lab' ? 'Upgrade (faster research)' : 'Upgrade';
+      items.push({ icon: ICON_FOR[u[1]] || u[1], label, cost: atMax ? undefined : u[1] === 'lab' ? 1500000 * u[4] : itemCost(u[1]), disabled: atMax, onClick: () => { send({ t: 'build', unit: u[1], tile }); closeRadial(); } });
+    }
+    if (u && (u[1] === 'factory' || u[1] === 'port')) items.push({ icon: 'build', label: 'Recall for refit', title: `Bring every ${u[1] === 'factory' ? 'Mech' : 'Warship and Submarine'} below level ${u[4]} home to refit`, onClick: () => { send({ t: 'recall', tile }); closeRadial(); } });
+    if (u) items.push({ icon: 'info', label: 'Building info', onClick: () => { closeRadial(); openInspect({ kind: 'building', tile }); } });
     if (u && u[1] === 'factory' && u[4] >= 2) items.push({ icon: 'target', label: 'Deploy Mech from here', cost: itemCost('mech'), disabled: !itemCan('mech'), onClick: () => { mechFrom = tile; placement = { kind: 'build', unit: 'mech', from: tile }; renderHotbar(); closeRadial(); toast('Now click where the Mech should patrol', true); } });
     if (u && u[1] === 'defense' && myHas('defensive_position')) items.push({ icon: 'troops', label: 'Garrison 10% troops', onClick: () => { send({ t: 'reinforce', tile }); closeRadial(); } });
     if (p.choices && p.choices.length) items.push({ icon: 'info', label: 'Research!', cls: 'build', onClick: () => { researchDismissed = false; openResearchPicker(p.choices); closeRadial(); } });
@@ -1016,7 +1133,8 @@ function openRadial(tile, sx, sy) {
     }
     if (p.alive && u && q && !p.allies.includes(o) && itemAvailable('bomber')) items.push({ icon: 'explosion', label: 'Bomber strike', cost: itemCost('bomber'), disabled: !itemCan('bomber'), onClick: () => { send({ t: 'build', unit: 'bomber', tile }); closeRadial(); } });
     { const m = nearestOwnMobileAt(sx, sy, 60); if (m) items.push({ icon: m.kind === 'mech' ? 'target' : 'warship', label: `Move ${m.kind}`, onClick: () => { selected = m; closeRadial(); toast('Click where it should go', true); } }); }
-    if (q) items.push({ icon: 'info', label: 'Info', onClick: () => { pinnedCard = o; renderPlayerCard(o, true); closeRadial(); } });
+    if (u) items.push({ icon: 'info', label: 'Building info', onClick: () => { closeRadial(); openInspect({ kind: 'building', tile }); } });
+    if (q) items.push({ icon: 'population', label: 'Nation info', onClick: () => { pinnedCard = o; renderPlayerCard(o, true); closeRadial(); } });
   }
   if (!items.length) items.push({ icon: 'x', label: 'Close', onClick: closeRadial });
   radialItems(items, center, sx, sy);
@@ -1234,7 +1352,7 @@ window.addEventListener('keydown', (e) => {
   if (typing) return;
   const k = e.key.toLowerCase();
   if (e.key === 'Enter') { openChat(); e.preventDefault(); return; }
-  if (e.key === 'Escape') { closeRadial(); closeResearchPicker(); placement = null; wallDraw = null; selected = null; selection = []; boxSelect = null; renderHotbar(); pinnedCard = 0; $('player-card').classList.add('hidden'); $('settings-popup').classList.add('hidden'); return; }
+  if (e.key === 'Escape') { closeInspect(); hideTip(); closeRadial(); closeResearchPicker(); placement = null; wallDraw = null; selected = null; selection = []; boxSelect = null; renderHotbar(); pinnedCard = 0; $('player-card').classList.add('hidden'); $('settings-popup').classList.add('hidden'); return; }
   if (k === 'a') { if (hoverTile >= 0 && G.phase === 'play') send({ t: 'attack', tile: hoverTile, ratio, focus: hoverTile }); return; }
   if (k === 'b') { if (hoverTile >= 0 && G.phase === 'play') send({ t: 'boat', tile: hoverTile, ratio }); return; }
   if (k === 'r') { const inc = G.attacks.filter((a) => a[2] === G.me); if (inc.length) send({ t: 'attackPlayer', p: inc[inc.length - 1][1], ratio }); return; }
@@ -1321,7 +1439,39 @@ function draw() {
     ctx.fillStyle = 'rgba(255, 213, 79, 0.45)'; ctx.strokeStyle = 'rgba(255, 213, 79, 0.9)'; ctx.lineWidth = 1.5 / cam.zoom;
     ctx.beginPath(); ctx.arc(tileX(hoverTile) + 0.5, tileY(hoverTile) + 0.5, 4.5, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
   }
-  if (placement && placement.kind === 'nuke' && hoverTile >= 0) {
+  // Aiming a missile shows every SAM umbrella on the map; anything mech-related shows every mech's
+  // ground-holding radius. Red for rivals, blue for you and your allies.
+  const aimingMissile = placement && (placement.kind === 'nuke' || (placement.kind === 'build' && (placement.unit === 'bomber' || placement.unit === 'airship')) || placement.kind === 'airship');
+  const mechContext = aimingMissile || (placement && ((placement.kind === 'build' && placement.unit === 'mech') || placement.kind === 'assault')) || (selected && selected.kind === 'mech') || selection.some((u) => u.kind === 'mech');
+  const friendly = (sm) => { const p = me(); return sm === G.me || (p && p.allies.includes(sm)); };
+  if (aimingMissile) {
+    ctx.lineWidth = 1.4 / cam.zoom;
+    for (const u of G.units) {
+      if (u[1] !== 'sam' || u[5] > 0) continue;
+      const owner = G.players.get(u[2]);
+      const r = 70 + (owner && owner.researches && owner.researches.includes('fighter_networks') ? 30 : 0);
+      ctx.strokeStyle = friendly(u[2]) ? 'rgba(120, 190, 255, 0.75)' : (u[6] > 0 ? 'rgba(255, 140, 120, 0.35)' : 'rgba(255, 90, 80, 0.85)');
+      ctx.setLineDash(u[6] > 0 ? [4 / cam.zoom, 4 / cam.zoom] : []);   // dashed while reloading
+      ctx.beginPath(); ctx.arc(tileX(u[3]) + 0.5, tileY(u[3]) + 0.5, r, 0, Math.PI * 2); ctx.stroke();
+    }
+    ctx.setLineDash([]);
+  }
+  if (mechContext) {
+    ctx.lineWidth = 1.2 / cam.zoom;
+    for (const mch of G.mechs) {
+      const [lx, ly] = lerpPeek('mech' + mch[0], mch[2], mch[3]);
+      ctx.strokeStyle = friendly(mch[1]) ? 'rgba(120, 200, 255, 0.55)' : 'rgba(255, 110, 100, 0.7)';
+      ctx.setLineDash([6 / cam.zoom, 5 / cam.zoom]);
+      ctx.beginPath(); ctx.arc(lx, ly, 30, 0, Math.PI * 2); ctx.stroke();
+    }
+    ctx.setLineDash([]);
+  }
+  if (placement && placement.kind === 'nuke' && placement.type === 'cluster' && hoverTile >= 0) {
+    const hx = tileX(hoverTile) + 0.5, hy = tileY(hoverTile) + 0.5;
+    ctx.fillStyle = 'rgba(255,120,60,0.12)'; ctx.beginPath(); ctx.arc(hx, hy, 26, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = 'rgba(255,140,80,0.9)'; ctx.lineWidth = 1.5 / cam.zoom; ctx.beginPath(); ctx.arc(hx, hy, 26, 0, Math.PI * 2); ctx.stroke();
+  }
+  if (placement && placement.kind === 'nuke' && placement.type !== 'cluster' && hoverTile >= 0) {
     const tact = myHas('tactical_nukes');
     const inner = placement.type === 'hydrogen' ? 80 : tact ? 8 : 12, outer = placement.type === 'hydrogen' ? 100 : tact ? 16 : 30;
     const hx = tileX(hoverTile) + 0.5, hy = tileY(hoverTile) + 0.5;
@@ -1446,6 +1596,13 @@ function draw() {
       ctx.fillStyle = '#67e8f9'; ctx.fillRect(x - bw / 2, y + r * 0.6 + 2, bw * (1 - clamp((volley || 0) / 900, 0, 1)), bh);
     }
     if (hp < maxHp) { const bw = clamp(6 * cam.zoom, 12, 30), bh = 3; ctx.fillStyle = 'rgba(0,0,0,0.7)'; ctx.fillRect(x - bw / 2, y - 12, bw, bh); ctx.fillStyle = hp / maxHp > 0.5 ? '#4caf50' : '#e53935'; ctx.fillRect(x - bw / 2, y - 12, bw * clamp(hp / maxHp, 0, 1), bh); }
+    if ((s[10] || 1) > 1 || s[11]) {
+      ctx.font = 'bold 10px system-ui, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      const tag = s[11] ? 'REFIT' : `L${s[10]}`;
+      const w2 = ctx.measureText(tag).width + 6;
+      ctx.fillStyle = 'rgba(0,0,0,0.7)'; ctx.fillRect(x - w2 / 2, y + 9, w2, 12);
+      ctx.fillStyle = s[11] ? '#ffd166' : '#fff'; ctx.fillText(tag, x, y + 15);
+    }
     if (isSel) { ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.setLineDash([3, 3]); ctx.beginPath(); ctx.arc(x, y, 14, 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([]); }
     else if (hoverUnit && hoverUnit.id === id) { ctx.strokeStyle = 'rgba(255,255,255,0.85)'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(x, y, 13, 0, Math.PI * 2); ctx.stroke(); }
   }
@@ -1554,15 +1711,15 @@ function draw() {
     ctx.fillStyle = hp / maxHp > 0.5 ? '#4caf50' : hp / maxHp > 0.25 ? '#f5c542' : '#e53935';
     ctx.fillRect(x - bw / 2, y - r - bh - 3, bw * clamp(hp / maxHp, 0, 1), bh);
     if (ownerSm === G.me) { ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(x - bw / 2, y + r + 3, bw, 2); ctx.fillStyle = '#ffb347'; ctx.fillRect(x - bw / 2, y + r + 3, bw * (1 - clamp(cannon / 60, 0, 1)), 2); }
-    if (ownerSm === G.me && mode && mode !== 'hold' && r >= 9) {
-      const tag = { roam: 'ROAM', defend: 'DEFEND', assault: 'ASSAULT' }[mode] || '';
+    if (ownerSm === G.me && (mch[13] || (mode && mode !== 'hold')) && r >= 9) {
+      const tag = mch[13] ? 'REFIT' : { roam: 'ROAM', defend: 'DEFEND', assault: 'ASSAULT' }[mode] || '';
       if (tag) {
         ctx.font = `bold ${Math.max(8, r * 0.5)}px "Segoe UI", system-ui, sans-serif`;
         ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
         const w = ctx.measureText(tag).width + 8;
         ctx.fillStyle = 'rgba(0,0,0,0.65)';
         ctx.fillRect(x - w / 2, y + r + 5, w, r * 0.62);
-        ctx.fillStyle = mode === 'assault' ? '#ff9e93' : mode === 'defend' ? '#9ad0ff' : '#b9f6ca';
+        ctx.fillStyle = mch[13] ? '#ffd166' : mode === 'assault' ? '#ff9e93' : mode === 'defend' ? '#9ad0ff' : '#b9f6ca';
         ctx.fillText(tag, x, y + r + 5 + r * 0.31);
       }
     }
@@ -1648,6 +1805,8 @@ const m = location.pathname.match(/^\/g\/([A-Za-z0-9]{4,6})/);
 if (m) { net.pendingJoin = m[1].toUpperCase(); history.replaceState(null, '', '/'); }
 $('name-input').value = net.name;
 loadAssets().then(() => { renderHotbar(); });
+$('cp-gold').addEventListener('mousemove', (e) => { const p = me(); if (p) showTip(goldTipHtml(p), e.clientX, e.clientY); });
+$('cp-gold').addEventListener('mouseleave', hideTip);
 connect();
 requestAnimationFrame(draw);
 setInterval(() => { if (net.connected) fetch('/healthz').catch(() => {}); }, 4 * 60 * 1000);

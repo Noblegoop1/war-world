@@ -193,3 +193,41 @@ a { color: #8ab4f8; }
 .rcard.tag-air { border-color: #94a3b8; } .rcard.tag-air .rcard-tag { color: #cbd5e1; }
 .rcard.tag-nuke { border-color: #f97316; } .rcard.tag-nuke .rcard-tag { color: #fdba74; }
 .rcard.tag-misc { border-color: #64748b; }
+
+/* ---- gold income ---- */
+#cp-gold { display: flex; flex-direction: column; align-items: flex-end; line-height: 1.05; cursor: help; }
+.cp-rate { font-size: 11px; font-weight: 600; color: #b9f6ca; }
+.cp-rate.peace { color: #9ad0ff; }
+
+/* ---- floating tooltip (research, income) ---- */
+#tip { position: fixed; z-index: 60; max-width: 320px; font-size: 12.5px; line-height: 1.45; pointer-events: none; padding: 8px 10px; }
+#tip .tip-h { font-weight: 800; font-size: 13px; margin-bottom: 2px; }
+#tip .tip-sub { color: var(--muted); font-size: 11px; margin-bottom: 4px; }
+#tip table { border-collapse: collapse; width: 100%; }
+#tip td { padding: 1px 0; }
+#tip td:last-child { text-align: right; padding-left: 12px; font-variant-numeric: tabular-nums; }
+/* research effect markup: green = good for them, red = a cost to them, purple = done to other nations */
+.fx-g { color: #6ee7a0; font-weight: 800; }
+.fx-r { color: #ff8a80; font-weight: 800; }
+.fx-p { color: #d5a6ff; font-weight: 800; }
+.fx-b { font-weight: 800; }
+.rcard-short { font-size: 13px; line-height: 1.4; }
+.rcard-time { font-size: 11px; color: var(--muted); }
+
+/* ---- research countdown (left, under the attacks) ---- */
+#research-panel { font-size: 12.5px; padding: 8px 10px; }
+#research-panel .rp-row { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; }
+#research-panel .rp-time { font-weight: 800; font-variant-numeric: tabular-nums; color: #9ad0ff; }
+#research-panel .rp-bar { height: 4px; background: #12161b; border-radius: 3px; margin-top: 5px; overflow: hidden; }
+#research-panel .rp-bar div { height: 100%; background: linear-gradient(90deg, #3b82f6, #9ad0ff); transition: width 0.5s linear; }
+
+/* ---- Info panel ---- */
+#inspect-panel { position: fixed; right: 14px; top: 64px; width: 300px; z-index: 40; font-size: 12.5px; padding: 10px 12px; }
+#inspect-panel .ip-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-bottom: 6px; }
+#inspect-panel .ip-title { font-weight: 800; font-size: 15px; }
+#inspect-panel .ip-sub { color: var(--muted); font-size: 11px; }
+#inspect-panel table { width: 100%; border-collapse: collapse; }
+#inspect-panel td { padding: 2px 0; vertical-align: top; }
+#inspect-panel td:first-child { color: var(--muted); padding-right: 10px; white-space: nowrap; }
+#inspect-panel td.good { color: #6ee7a0; }
+#inspect-panel td.bad { color: #ff8a80; }

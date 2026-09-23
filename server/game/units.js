@@ -66,7 +66,7 @@ module.exports = {
     }
     const existing = this.unitAt(tile);
     let upgrade = null;
-    const upgradable = type === UnitType.CITY || type === UnitType.PORT || type === UnitType.FACTORY;
+    const upgradable = type === UnitType.CITY || type === UnitType.PORT || type === UnitType.FACTORY || type === UnitType.LAB;
     if (existing) {
       if (existing.owner === p && existing.type === type && upgradable && existing.constructionLeft === 0) {
         if (existing.level >= this.config.maxUnitLevel(p, type)) return { ok: false, reason: `${type} is at its maximum level (${existing.level})` };
@@ -75,7 +75,8 @@ module.exports = {
       else if (!upgrade) return { ok: false, reason: 'Tile already has a structure' };
     } else if (this.unitNear(tile, 2)) return { ok: false, reason: 'Too close to another structure' };
     const count = upgrade ? p.unitLevels(type) : this.costIndex(p, type);
-    const cost = this.config.unitCost(type, count, p);
+    // a lab upgrade has its own price; the 5x ladder is for opening another lab
+    const cost = upgrade && type === UnitType.LAB ? this.config.labUpgradeCost(upgrade.level) * this.config.buildDiscount(p) : this.config.unitCost(type, count, p);
     if (p.gold < cost) return { ok: false, reason: `Not enough gold (need ${Math.floor(cost).toLocaleString()})` };
     return { ok: true, cost, upgrade };
   },
@@ -83,7 +84,18 @@ module.exports = {
     const c = this.canBuild(p, type, tile);
     if (!c.ok) return c;
     p.removeGold(c.cost);
-    if (c.upgrade) { c.upgrade.level++; if (c.upgrade.type === UnitType.FACTORY) this.events.push({ k: 'factoryUp', p: p.smallID, level: c.upgrade.level }); }
+    if (c.upgrade) {
+      const u = c.upgrade;
+      const before = this.config.labSpeedMultiplier(u.level);
+      u.level++;
+      if (u.type === UnitType.FACTORY) this.events.push({ k: 'factoryUp', p: p.smallID, level: u.level });
+      // a lab upgraded mid-research finishes the rest at the new pace
+      if (u.type === UnitType.LAB && p.research && p.research.labId === u.id) {
+        const left = p.research.doneTick - this.tick;
+        p.research.doneTick = this.tick + Math.round(left * this.config.labSpeedMultiplier(u.level) / before);
+      }
+      if (u.type === UnitType.FACTORY || u.type === UnitType.PORT) this.onProducerUpgraded(u);
+    }
     else {
       const u = { id: newId(), type, owner: p, tile, level: 1, constructionLeft: this.config.constructionTicks(type), cooldown: 0, garrison: 0, station: false, shellReady: 0 };
       this.units.push(u);
@@ -204,12 +216,14 @@ module.exports = {
       const posts = p.completedUnitsOf(UnitType.DEFENSE_POST);
       if (!posts.length) continue;
       const shipRange = this.config.defensePostShipRange(p), rate = this.config.defensePostShellRate(p);
-      const dmg = this.config.defensePostShipDamage(p);
+      const frac = R.defensePostShipDamagePct(p);   // a share of the target's own health, not a flat number
       for (const u of posts) {
         if (u.shellReady > this.tick) continue;
         if (!this.isCoastalPost(u)) continue;   // inland forts have no line on the sea
-        const target = this.nearestEnemyShip(p, this.x(u.tile) + 0.5, this.y(u.tile) + 0.5, shipRange, true);
-        if (target) { this.fireShell(p, u.tile, target, 'post', { dmg }); u.shellReady = this.tick + rate; }
+        // A plain post only engages warships. Coastal Defense Network turns it on everything afloat.
+        const allShips = p.researches.has('coastal_defense');
+        const target = this.nearestEnemyShip(p, this.x(u.tile) + 0.5, this.y(u.tile) + 0.5, shipRange, allShips, allShips);
+        if (target) { this.fireShell(p, u.tile, target, 'post', { dmg: frac * (target.maxHp || this.config.warshipHp()), speed: 3.5 }); u.shellReady = this.tick + rate; }
       }
       if (p.researches.has('defensive_position') && p.incomingAttacks.length && this.tick % 10 === 0) {
         const r = this.config.defensePostRange();
@@ -373,8 +387,8 @@ module.exports = {
     if (!p.pendingChoices || !p.pendingChoices.choices.includes(id)) return { ok: false, reason: 'Not an offered research' };
     const lab = this.units.find((u) => u.id === p.pendingChoices.labId);
     const tier = (RESEARCH_BY_ID[id] && RESEARCH_BY_ID[id].tier) || 2;
-    const ticks = this.config.labResearchTicks(tier);
-    p.research = { id, doneTick: this.tick + ticks, labId: p.pendingChoices.labId };
+    const ticks = Math.round(this.config.labResearchTicks(tier) * this.config.labSpeedMultiplier(lab ? lab.level : 1));
+    p.research = { id, doneTick: this.tick + ticks, startTick: this.tick, labId: p.pendingChoices.labId };
     p.pendingChoices = null;
     if (lab) { lab.cooldown = ticks + this.config.labCooldownTicks(); this.unitsChanged = true; }
     this.events.push({ k: 'researchStart', p: p.smallID, id });

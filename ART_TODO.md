@@ -40,7 +40,7 @@ colour** in pure grey **RGB 180,180,180**, the **darker border colour** in **RGB
 | Asset | Path | Notes |
 | --- | --- | --- |
 | Lab structure glyph | `public/assets/icons/LabIcon.svg` | White silhouette inside the hexagon shape. Replaces the "i". |
-| Research card art (1 per doctrine, 37 total) | `public/assets/research/<id>.png` | 240×120 landscape banners for the TFT-style cards. IDs: `war_economy`, `mass_production`, `industrial_mobilization`, `military_rail`, `strategic_logistics`, `military_industrial`, `defensive_position`, `coastal_defense`, `hardened_infra`, `military_district`, `fighter_networks`, `heavy_mech`, `assault_mech`, `mech_production`, `mech_weapons`, `longrange_mech`, `rapidfire_mech`, `amphibious_mech`, `coastal_bombardment`, `submarine_warfare`, `nuclear_subs`, `amphibious_warfare`, `naval_mines`, `naval_base`, `dday`, `strategic_bombers`, `close_air_support`, `tactical_nukes`, `mirv`, `nuclear_deterrence`, `field_engineering`, `megacity`, `heavy_industry`, `strategic_airlift`, `airbase_network`, `airborne_doctrine`, `interceptor_screen`. Doctrines don't change unit art — only the cards. |
+| Research card art (1 per doctrine, 42 total) | `public/assets/research/<id>.png` | 240×120 landscape banners for the TFT-style cards. IDs: `war_economy`, `mass_production`, `industrial_mobilization`, `military_rail`, `strategic_logistics`, `military_industrial`, `defensive_position`, `coastal_defense`, `hardened_infra`, `military_district`, `fighter_networks`, `heavy_mech`, `assault_mech`, `mech_production`, `mech_weapons`, `longrange_mech`, `rapidfire_mech`, `amphibious_mech`, `coastal_bombardment`, `submarine_warfare`, `nuclear_subs`, `amphibious_warfare`, `naval_mines`, `naval_base`, `dday`, `strategic_bombers`, `close_air_support`, `tactical_nukes`, `mirv`, `nuclear_deterrence`, `field_engineering`, `megacity`, `heavy_industry`, `strategic_airlift`, `airbase_network`, `airborne_doctrine`, `interceptor_screen`, `cluster_munitions`, `decoy_warheads`, `hypersonic_missiles`, `sead_doctrine`, `airborne_mechs`. Doctrines don't change unit art — only the cards. |
 | Research-complete flourish | sprite sheet / CSS-able PNG | Plays over the lab when a research finishes. |
 | **SFX:** picker open, card hover, card pick, research complete | `public/assets/sfx/research_*.ogg` | |
 
@@ -60,6 +60,10 @@ colour** in pure grey **RGB 180,180,180**, the **darker border colour** in **RGB
 | ~~Airship~~ | `public/assets/icons/AirshipIconWhite.png` | **Done** — supplied by you. Keyed to white-on-transparent and tinted to the owner's colour on the map, with a dark copy behind it for an outline. |
 | ~~Airport~~ | `public/assets/icons/AirportIconWhite.png` | **Done** — supplied by you. Keyed to white-on-transparent; the client tints it like any other icon. |
 | Fallout / radiation | `public/assets/tiles/fallout.png` | Currently a flat green-grey scar with a checker dither. A tileable radiated texture (and a slow shimmer) would sell it far better. |
+| Cluster Strike | `public/assets/icons/ClusterIconWhite.svg` + a bomblet sprite | Hotbar currently reuses the explosion glyph; bomblets fly as small atom sprites. |
+| Decoy / SAM fooled | VFX | A decoy currently shows as a white ring where the SAM engaged. |
+| Refit | `public/assets/icons/RefitIcon.svg` | Units in the yard get a yellow "REFIT" text chip; ships show "L2"/"L3" chips. |
+| Info panel | — | Plain table; a frame / per-type header art would lift it. |
 | Mech order badges | — | ROAM / DEFEND / ASSAULT are drawn as text chips under the mech. Small icons would be nicer. |
 | Fortified border | — | Border tiles under a defense post are drawn in pale stone. A proper battlement texture would be better. |
 | Nuke arc | — | Dashed red Bézier + target ring; a proper contrail sprite sheet would look better. |

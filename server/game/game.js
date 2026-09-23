@@ -105,6 +105,9 @@ class Player {
     this.focusTile = -1;           // where the player wants expansion pulled toward (mouse / AI intent)
     this.connectedFactories = 0;
     this.lastNukedBy = null;
+    this.lastOffenseTick = -1e9;   // last time we attacked a nation (peace dividend)
+    this.incomeBucket = {};        // gold earned this second, by source
+    this.incomeRate = {};          // smoothed gold per second, by source
   }
   get numTiles() { return this.tiles.size; }
   get alive() { return this.spawned && this.tiles.size > 0; }
@@ -117,7 +120,11 @@ class Player {
   cityLevels() { return this.unitLevels(UnitType.CITY); }
   addTroops(n) { this.troops = Math.max(0, this.troops + n); }
   removeTroops(n) { const r = Math.min(this.troops, Math.max(0, Math.floor(n))); this.troops -= r; return r; }
-  addGold(n) { this.gold += n; this.goldEarned += n; }
+  // Every payout names its source so the HUD can show where the money comes from.
+  addGold(n, src = 'other') {
+    this.gold += n; this.goldEarned += n;
+    if (n > 0) this.incomeBucket[src] = (this.incomeBucket[src] || 0) + n;
+  }
   removeGold(n) { const r = Math.min(this.gold, Math.max(0, n)); this.gold -= r; return r; }
   relation(other) { return this.relations.get(other.id) ?? 0; }
   updateRelation(other, delta) { this.relations.set(other.id, within(this.relation(other) + delta, -100, 100)); }
@@ -130,12 +137,15 @@ class Player {
 const FOCUS_PULL = 0.4;
 // Unclaimed-landmass scan (see neutralRegions): how often to redo it, and the smallest patch worth a boat.
 const REGION_SCAN_INTERVAL = 300;
-const MIN_REGION_SIZE = 60;
+const MIN_REGION_SIZE = 10;        // small islands count: an island is defensible ground, however small
+// Radiation decays one step every FALLOUT_DECAY_INTERVAL ticks (see addFallout / tickFallout).
+const FALLOUT_DECAY_INTERVAL = 10;
+// Income by source is averaged over ~30s so a trade ship landing doesn't make the HUD jump.
+const INCOME_WINDOW_TICKS = 10;
+const INCOME_SMOOTHING = 1 / 30;
 // Attack marker (the crossed swords + troop count). We keep the last FRONT_SAMPLE conquests and put the
 // marker on whichever of them sits nearest their centre, so it always lands on ground the attack is
 // actually taking. A plain average drifts into the middle of the defender when a front wraps around them.
-// Radiation decays one step every FALLOUT_DECAY_INTERVAL ticks (see addFallout / tickFallout).
-const FALLOUT_DECAY_INTERVAL = 10;
 const FRONT_SAMPLE = 48;
 const FRONT_SMOOTHING = 0.3;
 const FOCUS_MIN_DISTANCE = 8;
@@ -518,9 +528,21 @@ class Game {
     for (const p of this.players) {
       if (!p.alive) continue;
       p.addTroops(this.config.troopIncreaseRate(p));
-      const g = this.config.goldAdditionRate(p, p.isAttacking());
+      const g = this.config.goldAdditionRate(p, p.isAttacking(), this.tick);
       p.goldRate = g;
-      p.addGold(g);
+      p.addGold(g, 'passive');
+    }
+    // fold this second's earnings into a ~30s moving average per source
+    if (this.tick % INCOME_WINDOW_TICKS === 0) {
+      for (const p of this.players) {
+        if (!p.alive) continue;
+        const keys = new Set([...Object.keys(p.incomeRate), ...Object.keys(p.incomeBucket)]);
+        for (const k of keys) {
+          const perSec = (p.incomeBucket[k] || 0) * (10 / INCOME_WINDOW_TICKS);
+          p.incomeRate[k] = (p.incomeRate[k] || 0) * (1 - INCOME_SMOOTHING) + perSec * INCOME_SMOOTHING;
+        }
+        p.incomeBucket = {};
+      }
     }
     for (const u of this.units) {
       if (u.constructionLeft > 0) { u.constructionLeft--; if (u.constructionLeft === 0) { this.unitsChanged = true; this.onUnitCompleted(u); } }
@@ -544,6 +566,8 @@ class Game {
     this.tickArtillery();
     this.tickRepairYards();
     this.tickFallout();
+    // give the nation AIs a look at what just happened, so they can remember it
+    if (this.events.length) for (const pl of this.players) if (pl.alive && pl.ai && pl.ai.note) pl.ai.note(this.events);
     this.expireAllianceRequests();
     for (const p of this.players) if (p.ai && p.alive) p.ai.tick();
     this.checkDeaths();
@@ -601,6 +625,7 @@ class Game {
     troops = Math.min(p.troops, Math.floor(troops));
     if (troops < 1) return null;
     p.removeTroops(troops);
+    if (target && target.type !== PlayerType.BOT) p.lastOffenseTick = this.tick;
     const a = new Attack(newId(), p, target, troops, sourceTile);
     const c = sourceTile !== null ? { x: this.x(sourceTile), y: this.y(sourceTile) } : (this.centroid(p) || { x: 0, y: 0 });
     a.originX = c.x; a.originY = c.y;
@@ -707,7 +732,8 @@ class Game {
       while (head < tail) {
         const t = queue[head++];
         size++; sx += t % W; sy += (t / W) | 0;
-        if (this.isOceanShore(t) && shores.length < 64 && (size & 7) === 1) shores.push(t);
+        // keep every shore tile of a small island, then sample: a 12-tile island must not lose its only beach
+        if (this.isOceanShore(t) && shores.length < 64 && (shores.length < 8 || (size & 7) === 1)) shores.push(t);
         const m = this.neighbors4(t, b);
         if (m < 4) edge++;
         for (let k = 0; k < m; k++) {
@@ -722,7 +748,7 @@ class Game {
       regions.push({ size, cx: sx / size, cy: sy / size, shores, hostile, edge });
     }
     regions.sort((a, b2) => b2.size - a.size);
-    this.regionsCache = regions.slice(0, 24);
+    this.regionsCache = regions.slice(0, 160);   // not just the biggest few: small islands are what got ignored
     return this.regionsCache;
   }
   // A mech holds ground like a defense post: attacks near one bleed harder and crawl.
@@ -860,7 +886,7 @@ class Game {
     if (!target.alive) return;
     const gold = this.config.conquerGoldAmount(target);
     target.removeGold(Math.min(target.gold, gold));
-    conqueror.addGold(gold);
+    conqueror.addGold(gold, 'conquest');
     target.conqueredBy = conqueror;
     for (const t of [...target.tiles]) this.conquer(conqueror, t);
     for (const u of [...target.units]) this.transferUnit(u, conqueror);
@@ -914,7 +940,7 @@ class Game {
     if (!from.alive || !to.alive || !from.allies.has(to.id)) return false;
     troops = Math.max(0, Math.floor(troops || 0)); gold = Math.max(0, Math.floor(gold || 0));
     const t = from.removeTroops(troops); to.addTroops(t);
-    const g = from.removeGold(gold); to.addGold(g);
+    const g = from.removeGold(gold); to.addGold(g, 'donation');
     if (t > 0 || g > 0) this.events.push({ k: 'donate', from: from.smallID, to: to.smallID, troops: t, gold: g });
     return true;
   }
@@ -958,12 +984,26 @@ class Game {
       (p.spawned ? 1 : 0) | (p.alive ? 2 : 0) | (p.isTraitor() ? 4 : 0) | (p.disconnected ? 8 : 0),
       Math.floor(cfg.maxTroops(p)), [...p.allies].map((id) => this.player(id)?.smallID || 0),
       Math.floor(p.alive ? cfg.troopIncreaseRate(p) * TICKS_PER_SECOND : 0),
-      [[...p.researches], p.research ? [p.research.id, Math.max(0, p.research.doneTick - this.tick)] : null, p.type === PlayerType.HUMAN && p.pendingChoices ? p.pendingChoices.choices : null],
+      [[...p.researches], p.research ? [p.research.id, Math.max(0, p.research.doneTick - this.tick), Math.max(1, p.research.doneTick - (p.research.startTick ?? this.tick))] : null, p.type === PlayerType.HUMAN && p.pendingChoices ? p.pendingChoices.choices : null],
       this.attackPower(p), this.economyPower(p), p.numWallTiles, p.mechs.length,
       p.warships.filter((w) => !w.done).length, p.subs.filter((s) => !s.done).length,
       Math.floor(this.troopsDeployed(p)),
       p.airships.filter((a) => !a.done).length, p.airshipsBuilt || 0, cfg.maxResearchesPerPlayer(p),
+      this.incomePacket(p),
     ]);
+  }
+  // Where this nation's money comes from, per second: the passive parts exactly, the lumpy ones
+  // (trade, trains, conquest, plunder) as a moving average.
+  incomePacket(p) {
+    const cfg = this.config;
+    const g = cfg.passiveGold(p);
+    const mult = R.goldMultiplier(p, p.isAttacking()) * (p.type !== PlayerType.BOT && cfg.isAtPeace(p, this.tick) ? cfg.peaceDividendMultiplier() : 1);
+    const r = p.incomeRate;
+    return [
+      Math.round(g.base * mult * TICKS_PER_SECOND), Math.round(g.land * mult * TICKS_PER_SECOND), Math.round(g.cities * mult * TICKS_PER_SECOND),
+      p.type !== PlayerType.BOT && cfg.isAtPeace(p, this.tick) ? 1 : 0,
+      Math.round(r.trade || 0), Math.round(r.train || 0), Math.round(r.conquest || 0), Math.round(r.plunder || 0),
+    ];
   }
   // Troops that have left home but still belong to this player: attacks in progress, boats in transit and
   // garrisons sitting in defense posts. The client shows these as the lighter part of the troop bar.
@@ -986,16 +1026,16 @@ class Game {
   tradePacket() { return this.tradeShips.filter((s) => !s.done).map((s) => [s.id, s.owner.smallID, this.r1(s.x), this.r1(s.y)]); }
   shipsPacket(viewer) {
     const out = [];
-    for (const w of this.warships) if (!w.done) out.push([w.id, 'warship', w.owner.smallID, this.r1(w.x), this.r1(w.y), Math.round(w.hp), this.config.warshipHp(), w.patrol]);
+    for (const w of this.warships) if (!w.done) out.push([w.id, 'warship', w.owner.smallID, this.r1(w.x), this.r1(w.y), Math.round(w.hp), w.maxHp || this.config.warshipHp(), w.patrol, 0, 0, w.level || 1, w.refit ? 1 : 0]);
     for (const s of this.subs) {
       if (s.done) continue;
       const mine = viewer && (s.owner === viewer || s.owner.isFriendly(viewer));
       if (!mine && !s.detected) continue; // invisible unless detected
-      out.push([s.id, 'submarine', s.owner.smallID, this.r1(s.x), this.r1(s.y), Math.round(s.hp), this.config.submarineHp(), s.patrol, Math.max(0, s.volleyReady - this.tick), s.detected ? 1 : 0]);
+      out.push([s.id, 'submarine', s.owner.smallID, this.r1(s.x), this.r1(s.y), Math.round(s.hp), s.maxHp || this.config.submarineHp(), s.patrol, Math.max(0, s.volleyReady - this.tick), s.detected ? 1 : 0, s.level || 1, s.refit ? 1 : 0]);
     }
     return out;
   }
-  mechsPacket() { return this.mechs.filter((m) => !m.done).map((m) => [m.id, m.owner.smallID, this.r1(m.x), this.r1(m.y), Math.round(m.hp), Math.round(m.maxHp), m.engaged ? 1 : 0, m.level, m.patrol, Math.max(0, m.cannonReady - this.tick), m.range, m.mode, m.orderTarget]); }
+  mechsPacket() { return this.mechs.filter((m) => !m.done).map((m) => [m.id, m.owner.smallID, this.r1(m.x), this.r1(m.y), Math.round(m.hp), Math.round(m.maxHp), m.engaged ? 1 : 0, m.level, m.patrol, Math.max(0, m.cannonReady - this.tick), m.range, m.mode, m.orderTarget, m.refit ? 1 : 0]); }
   shellsPacket() { return this.shells.map((s) => [s.id, s.owner.smallID, this.r1(s.x), this.r1(s.y), this.r1(s.tx), this.r1(s.ty), s.kind]); }
   trainsPacket() { return this.trains.filter((t) => !t.done).map((t) => [t.id, t.owner.smallID, this.r1(t.x), this.r1(t.y), t.cars.map((c) => [this.r1(c.x), this.r1(c.y)])]); }
   railsPacket() { return this.rails.map((r) => [r.id, r.a.id, r.b.id, r.tiles]); }
@@ -1037,6 +1077,6 @@ class Game {
 }
 
 // ---- mix in the other systems ----
-Object.assign(Game.prototype, require('./units'), require('./navy'), require('./rails'), require('./mechs'), require('./nukes'), require('./air'));
+Object.assign(Game.prototype, require('./units'), require('./navy'), require('./rails'), require('./mechs'), require('./nukes'), require('./air'), require('./refit'), require('./inspect'));
 
 module.exports = { Game, Player, PlayerType, UnitType, NukeType, newId };

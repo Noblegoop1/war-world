@@ -42,9 +42,10 @@ Open <http://localhost:3000>, pick a name, **Create game**, choose a map, **Star
     each further level makes Mechs tougher and longer-ranged.
   * **Defense Post** — attackers within 30 tiles lose 5x troops and move 3x slower, and your own
     border tiles inside that radius are 1.5x harder again (the client draws them in pale stone so you
-    can see which stretch is fortified). A post within 6 tiles of open water also shells enemy ships,
-    but only for ~0.4% of a warship's health per shell — coastal guns harass ships, they don't sink
-    them. Coastal Defense Network raises that to 1.5%.
+    can see which stretch is fortified). A post within 6 tiles of open water also shells **enemy
+    warships** every 4 seconds for **0.25% of the ship's health** per shell — coastal guns harass
+    ships, they don't sink them — and a ship under fire stops repairing at sea. Coastal Defense
+    Network turns them on every ship afloat, at double range, for 1.5% a shell.
   * **Artillery Battery** — a siege gun with 45-tile reach that fires once every 45 seconds and hits
     like a truck: **25% of a Mech's health** or **10% of a warship's** per shell. It targets enemy
     Mechs first (this is the answer to a Mech parked on your border), then ships, then whichever
@@ -91,21 +92,33 @@ Open <http://localhost:3000>, pick a name, **Create game**, choose a map, **Star
   ports, and with Coastal Bombardment shell coastal land too. Click one, then water, to move it.
 * **Research Lab** (key **7**) — needs **3 Cities**, must be within rail range of a Factory, and
   away from Cities. When ready it offers **3 random doctrines** (TFT-augment style); pick one and it
-  takes **3–5 minutes** depending on how strong it is, then the lab cools down. Each lab is worth
-  **two doctrines**, and every extra lab costs **five times** the last — a third doctrine is a real
-  economic decision. **Lose the lab and the research dies with it**: bomb it, nuke it or take the
-  ground and the work stops, so where you put it matters. Everyone can see a nation's
-  researches on its info card. All 30 doctrines are live — most are stat buffs (War Economy, Mass
-  Production, Industrial Mobilization, Military Rail, Strategic Logistics, Military-Industrial
-  Complex, Defensive Position, Coastal Defense Network, Hardened Infrastructure, Military
-  District, Fighter Networks, Heavy / Assault / Long-Range / Rapid-Fire Mech, Mech Production,
-  Mech Weapons, Coastal Bombardment, Nuclear Subs, Amphibious Warfare, D-Day, Close Air Support,
-  Tactical Nukes, MIRV, Nuclear Deterrence, Field Engineering) and some unlock units or change
-  mechanics: **Field Engineering** (Repair Yard, plus better Artillery), **Submarine
-  Warfare** (invisible subs firing missile volleys that bypass SAMs), **Naval Mines**, **Strategic
-  Bombers** (click an enemy structure to bomb it), **Amphibious Mech**, **Naval Base**. AI nations
-  pick by situation and *use* what they pick (war economy -> attack more, subs -> build subs, ...).
-* **Colonising** — empty landmasses are worth taking. AI nations run a periodic scan for unclaimed
+  takes **3–5 minutes** depending on how strong it is (the card says which), then the lab cools down.
+  **Upgrade the lab** (up to level 3) to research faster — ×0.8, then ×0.65 of the time; a 5-minute
+  doctrine never drops below ~3¼ minutes. Each lab is worth **two doctrines**, and every extra lab
+  costs **five times** the last. **Lose the lab and the research dies with it**: bomb it, nuke it or
+  take the ground and the work stops, so where you put it matters. Your current research counts
+  down on the left, under the attacks. On any nation's card, **hover a doctrine** for a one-line
+  summary: green for what it gives them, red for what it costs them, purple for what it does to
+  everyone else.
+  There are **42 doctrines**. Most are stat changes; several unlock units or change how things work,
+  including four answers to SAM umbrellas:
+  * **Cluster Munitions** — the Cluster Strike: eight small missiles at once. A SAM stops one missile
+    per reload, so against three SAMs five of the eight land.
+  * **Decoy Warheads** — a SAM that engages your missile has a 55% chance to hit a decoy instead.
+  * **Hypersonic Missiles** — twice the speed, and a SAM that scores still reloads 3× slower.
+  * **SEAD Doctrine** — airship drops wreck every enemy SAM within 15 tiles; bombers sent at SAMs
+    can't be shot down.
+  And for mech nations: **Amphibious Mechs** cross water, take 95% of a warship's health per shell
+  and spot submarines within 30 tiles; **Airborne Mechs** move twice as fast over land and water and
+  shoot down airships, at the cost of 80% of their damage against everything else.
+* **The AI** keeps a short memory of every rival — what they've built, which doctrines they hold,
+  whether they're growing, and what they've done to it (who attacked, whose SAMs shot its missiles
+  down, who downed its airships). From that it picks a posture (expand, build, turtle, war) and
+  chooses doctrines against what it actually faces: SAM walls draw anti-SAM research and airships
+  aimed at the launchers; airlifts draw Interceptor Screen; navies draw Coastal Defense and
+  Amphibious Mechs. Its missiles are routed around SAM umbrellas along their real flight path, and
+  it paces strikes so games don't turn into wastelands.
+* **Colonising** — empty landmasses, including **small islands**, are worth taking. AI nations run a periodic scan for unclaimed
   regions and ship troops to the best one, scoring by size, distance and how isolated it is, so places
   like Greenland and Antarctica get settled instead of sitting empty all game. The harder the AI, the
   further it will sail for a free continent.
@@ -116,8 +129,14 @@ Open <http://localhost:3000>, pick a name, **Create game**, choose a map, **Star
 * **Levels** — every building tops out at **level 3**. A Factory above level 2 also runs better: each
   level past 2 makes its trains pay 35% more. One doctrine can push a single building type to level 4
   (**Megacity Planning** for Cities, **Heavy Industry** for Factories) and that last step is a big one.
-* **Conquering** a nation or tribe pays gold: its treasury (all of an AI's, half of a human's) +
-  10K + 15 per tile. Tribes start weak, grow a little, and stay weak.
+* **Economy** — there is more than one way to get rich. Passive income is a small flat base plus:
+  **land**, which pays by the *square root* of your territory (ten times the land is about three
+  times the gold, so conquest alone doesn't run away with it), and **Cities**, which pay by level
+  (0.7K/s at level 1, 2.5K/s at level 3, a big jump at level 4). Go 90 seconds without attacking a
+  nation and a **peace dividend** multiplies all of that by 1.3. Trade ships between **allies** pay
+  50% more. Hover your gold for a live breakdown by source.
+* **Conquering** a nation or tribe pays **half its treasury** + 10K + 15 per tile. Tribes start
+  weak, grow a little, and stay weak.
 * **Expansion** uses OpenFront's frontier priority (terrain + already-owned neighbours + a little
   noise) so fronts stay smooth, plus a bias: a player's expansion leans ~20% toward their mouse
   while they have attacks running; AI nations lean toward the direction they want to grow.
@@ -135,6 +154,17 @@ The **troop bar** shows your army, not just what's at home: the solid part is tr
 land, the striped part is what you've committed to attacks, boats and garrisons — still yours, still
 coming back. The rate above it turns **amber** when your cap is what's throttling growth rather than
 your land, so it's a cue to build Cities or take ground.
+
+**Unit levels and refits:** a Mech is built at its Factory's level, a Warship or Submarine at its
+Port's (+35% health and +25% damage per level). Upgrading the building doesn't upgrade what's already
+in the field — **idle** units below the new level head home on their own (anything in a fight stays
+put), spend 30 seconds in the yard fully repaired, and go back to their orders. Force it with
+**Recall for refit** on the building, or **Refit** on a unit.
+
+**Info on anything:** right-click a building or a unit (yours or anyone's) → **Info** for its live
+numbers — health, damage, reload, range, speed on each kind of ground, gold per second, what it
+engages. Aiming a missile outlines **every SAM umbrella** on the map (red for rivals, dashed while
+reloading); anything to do with mechs outlines every mech's 30-tile ground-holding radius.
 
 **Selecting units:** click any mech or ship — the hit area follows the icon, so you don't have to zoom
 in. **Shift-drag** a box to select several at once; with a unit button armed (Mech, Warship, Submarine)
@@ -210,7 +240,9 @@ server/game/mechs.js   Mechs: build from factories, patrol, cannon, stomp, terri
 server/game/navy.js    Boats, trade ships, shells, warships, submarines, naval mines
 server/game/nukes.js   Nukes on Bezier arcs, blast, fallout, SAMs, MIRV, deterrence, bombers
 server/game/air.js     Airports and airships: the way past a SAM + navy turtle
-server/game/research.js  The 30 doctrines and every multiplier they apply
+server/game/refit.js   Unit levels and refits (units go home to catch up with an upgraded building)
+server/game/inspect.js The numbers behind every Info panel, computed from the live config
+server/game/research.js  The 42 doctrines, their tooltip lines, and every multiplier they apply
 server/game/path.js    8-connected A* (octile), path resampling, Bezier helpers
 server/game/ai.js      Nation AI (research-driven; factories, mechs + standing orders, navy,
                        colonising empty landmasses, choke-point walls, nukes, bombers) and bot AI

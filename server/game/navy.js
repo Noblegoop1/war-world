@@ -6,6 +6,9 @@ const { newId } = require('./ids');
 const { astar, resamplePath } = require('./path');
 const R = require('./research').effects;
 
+// A ship that was hit within this many ticks does not regenerate at sea.
+const SHIP_COMBAT_REGEN_DELAY = 100;
+
 module.exports = {
   // ---- water pathing ------------------------------------------------------------
   waterCost(t) { return this.isWater(t) ? 1 + (this.isOcean(t) ? 0 : 0.5) : 0; },
@@ -168,9 +171,10 @@ module.exports = {
       s.done = true;
       const dstOwner = s.dstPort.owner;
       if (dstOwner === s.owner) continue;
-      const base = cfg.tradeShipGold(s.dist);
-      s.owner.addGold(Math.floor(base * R.tradeGoldMultiplier(s.owner)));
-      dstOwner.addGold(Math.floor(base * R.tradeGoldMultiplier(dstOwner)));
+      // allies trade on better terms: the diplomat's income
+      const base = cfg.tradeShipGold(s.dist) * (s.owner.isFriendly(dstOwner) ? cfg.alliedTradeBonus() : 1);
+      s.owner.addGold(Math.floor(base * R.tradeGoldMultiplier(s.owner)), 'trade');
+      dstOwner.addGold(Math.floor(base * R.tradeGoldMultiplier(dstOwner)), 'trade');
       if (s.owner.type === PlayerType.HUMAN) this.events.push({ k: 'trade', to: s.owner.id, gold: base, p: dstOwner.smallID });
       if (dstOwner.type === PlayerType.HUMAN) this.events.push({ k: 'trade', to: dstOwner.id, gold: base, p: s.owner.smallID });
     }
@@ -213,7 +217,16 @@ module.exports = {
   },
   shellImpact(s) {
     const owner = s.owner;
-    if (s.kind === 'ship' || s.kind === 'mechAA') {
+    if (s.kind === 'flak') {
+      // an Airborne Mech's shell: an airship has no armour to speak of
+      if (s.target && !s.target.done && this.airships.includes(s.target)) {
+        s.target.done = true;
+        this.events.push({ k: 'airshipDown', by: owner.smallID, p: s.target.owner.smallID, x: s.target.x, y: s.target.y });
+      }
+      return;
+    }
+    // warship guns, a mech firing at sea, and coastal defense posts all hit the ship they were aimed at
+    if (s.kind === 'ship' || s.kind === 'mechAA' || s.kind === 'post') {
       if (s.target && !s.target.done) this.damageShip(s.target, s.dmg || this.config.shellDamage(this.rng), owner);
       return;
     }
@@ -294,11 +307,12 @@ module.exports = {
     if (s.dstPort !== undefined) { // trade ship: captured — the attacker takes the cargo
       s.done = true;
       const gold = this.config.tradeShipGold(s.dist);
-      by.addGold(gold);
+      by.addGold(gold, 'plunder');
       this.events.push({ k: 'sunk', kind: 'trade', p: s.owner.smallID, by: by.smallID, x: s.x, y: s.y, gold });
       return;
     }
     s.hp -= dmg;
+    s.lastHitTick = this.tick;
     if (s.hp <= 0) {
       s.done = true;
       this.events.push({ k: 'sunk', kind: s.kind, p: s.owner.smallID, by: by.smallID, x: s.x, y: s.y });
@@ -326,7 +340,8 @@ module.exports = {
     if (!spawnW.length) return { ok: false, reason: 'Port has no water access' };
     p.removeGold(c.cost);
     const st = spawnW[0];
-    const w = { id: newId(), kind: 'warship', owner: p, x: this.x(st) + 0.5, y: this.y(st) + 0.5, hp: this.config.warshipHp(), patrol: tile, pts: [], idx: 0, shellReady: 0, done: false, wanderAt: 0, targetId: 0 };
+    const w = { id: newId(), kind: 'warship', owner: p, x: this.x(st) + 0.5, y: this.y(st) + 0.5, hp: 0, patrol: tile, pts: [], idx: 0, shellReady: 0, done: false, wanderAt: 0, targetId: 0 };
+    this.applyUnitLevel('warship', w, c.port.level);   // built at its port's level
     p.warships.push(w);
     this.warships.push(w);
     this.events.push({ k: 'warship', p: p.smallID });
@@ -335,6 +350,7 @@ module.exports = {
   moveShip(p, id, tile) {
     const s = this.warships.find((w) => w.id === id && w.owner === p) || this.subs.find((w) => w.id === id && w.owner === p);
     if (!s || s.done || !this.isWater(tile)) return { ok: false, reason: 'Pick a water tile' };
+    if (s.refit) this.cancelRefit(s);   // an explicit order beats a refit
     s.patrol = tile; s.pts = []; s.idx = 0; s.wanderAt = 0;
     return { ok: true };
   },
@@ -361,13 +377,20 @@ module.exports = {
     for (const w of this.warships) {
       if (w.done) continue;
       if (!w.owner.alive) { w.done = true; continue; }
-      // repair near own ports
-      const nearPort = w.owner.units.some((u) => u.type === UnitType.PORT && this.dist(u.tile, this.tileAt(w.x, w.y)) < 25);
-      if (w.hp < cfg.warshipHp()) w.hp = Math.min(cfg.warshipHp(), w.hp + (nearPort ? 3 * R.warshipRepairMultiplier(w.owner) : 0.3));
+      if (this.tickRefit('warship', w)) continue;
+      w.maxHp = w.maxHp || cfg.warshipHp();
+      // Repair: fast alongside our own ports; slow at sea, and not at all while under fire. Without that
+      // last rule a ship sitting off a coast out-healed every small gun shooting at it.
+      if (w.hp < w.maxHp) {
+        const nearPort = w.owner.units.some((u) => u.type === UnitType.PORT && this.dist(u.tile, this.tileAt(w.x, w.y)) < 25);
+        const underFire = this.tick - (w.lastHitTick ?? -1e9) < SHIP_COMBAT_REGEN_DELAY;
+        const heal = nearPort ? 3 * R.warshipRepairMultiplier(w.owner) : underFire ? 0 : 0.3;
+        w.hp = Math.min(w.maxHp, w.hp + heal);
+      }
       this.shipWander(w, cfg.warshipSpeed(), cfg.warshipPatrolRange());
       if (w.shellReady > this.tick) continue;
       const target = this.nearestEnemyShip(w.owner, w.x, w.y, cfg.warshipTargetRange());
-      if (target) { this.fireShell(w.owner, w, target, 'ship'); w.shellReady = this.tick + cfg.warshipShellRate(); continue; }
+      if (target) { this.fireShell(w.owner, w, target, 'ship', { dmg: Math.round(cfg.shellDamage(this.rng) * cfg.warshipDamageMultiplier(w.level || 1)) }); w.shellReady = this.tick + cfg.warshipShellRate(); continue; }
       // amphibious enemy mechs at sea
       const mech = this.mechs.find((m) => !m.done && m.onWater && this.hostile(w.owner, m.owner) && Math.hypot(m.x - w.x, m.y - w.y) <= cfg.warshipTargetRange());
       if (mech) { this.fireShell(w.owner, w, null, 'mech', { tx: mech.x, ty: mech.y, dmg: 600, troopKill: 0 }); w.shellReady = this.tick + cfg.warshipShellRate(); continue; }
@@ -414,7 +437,8 @@ module.exports = {
     if (!spawnW.length) return { ok: false, reason: 'Port has no water access' };
     p.removeGold(c.cost);
     const st = spawnW[0];
-    const s = { id: newId(), kind: 'submarine', owner: p, x: this.x(st) + 0.5, y: this.y(st) + 0.5, hp: this.config.submarineHp(), patrol: tile, pts: [], idx: 0, done: false, wanderAt: 0, detected: false, volleyReady: this.tick + 300, nukeReady: 0 };
+    const s = { id: newId(), kind: 'submarine', owner: p, x: this.x(st) + 0.5, y: this.y(st) + 0.5, hp: 0, patrol: tile, pts: [], idx: 0, done: false, wanderAt: 0, detected: false, volleyReady: this.tick + 300, nukeReady: 0 };
+    this.applyUnitLevel('submarine', s, c.port ? c.port.level : 1);
     p.subs.push(s);
     this.subs.push(s);
     this.events.push({ k: 'sub', p: p.smallID });
@@ -425,11 +449,13 @@ module.exports = {
     for (const s of this.subs) {
       if (s.done) continue;
       if (!s.owner.alive) { s.done = true; continue; }
+      if (this.tickRefit('submarine', s)) continue;
       this.shipWander(s, cfg.warshipSpeed() * 0.8, cfg.warshipPatrolRange() * 0.6);
       // detection: any hostile warship (or amphibious mech) within 10 tiles
       const dr = cfg.submarineDetectRange();
       s.detected = this.warships.some((w) => !w.done && this.hostile(s.owner, w.owner) && Math.hypot(w.x - s.x, w.y - s.y) <= dr)
-        || this.mechs.some((m) => !m.done && m.onWater && this.hostile(s.owner, m.owner) && Math.hypot(m.x - s.x, m.y - s.y) <= dr);
+        || this.mechs.some((m) => !m.done && this.hostile(s.owner, m.owner) && Math.hypot(m.x - s.x, m.y - s.y)
+          <= (R.mechAmphibious(m.owner) ? cfg.mechSubDetectRange() : m.onWater ? dr : -1));   // amphibious mechs hunt subs
       if (this.tick < s.volleyReady) continue;
       // volley of 3 missiles at the nearest hostile structures in range (fallback: hostile coast)
       const rr = cfg.submarineMissileRange();

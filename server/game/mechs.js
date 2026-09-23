@@ -23,7 +23,7 @@ module.exports = {
   mechFactories(p) { return p.completedUnitsOf(UnitType.FACTORY).filter((f) => f.level >= this.config.mechFactoryLevelRequired()); },
   canBuildMech(p, targetTile, fromTile = -1) {
     if (!p.alive) return { ok: false, reason: 'dead' };
-    const amph = R.mechAmphibious(p);
+    const amph = R.mechCrossesWater(p);
     if (!this.isLand(targetTile) && !(amph && this.isWater(targetTile))) return { ok: false, reason: amph ? 'Pick a land or water tile' : 'Mechs are land-locked: pick a land tile' };
     const facs = this.mechFactories(p);
     if (!facs.length) return { ok: false, reason: 'Mechs need a level-2 Factory (build a Factory, then build on it again to upgrade)' };
@@ -52,7 +52,8 @@ module.exports = {
   moveMech(p, id, tile) {
     const m = this.mechs.find((x) => x.id === id && x.owner === p && !x.done);
     if (!m) return { ok: false, reason: 'No such mech' };
-    if (!this.isLand(tile) && !(R.mechAmphibious(p) && this.isWater(tile))) return { ok: false, reason: R.mechAmphibious(p) ? 'Pick a land or water tile' : 'Mechs are land-locked' };
+    if (!this.isLand(tile) && !(R.mechCrossesWater(p) && this.isWater(tile))) return { ok: false, reason: R.mechCrossesWater(p) ? 'Pick a land or water tile' : 'Mechs are land-locked' };
+    if (m.refit) this.cancelRefit(m);
     m.patrol = tile;
     m.mode = 'hold';
     this.mechPathTo(m, tile);
@@ -125,7 +126,7 @@ module.exports = {
       default: return -1;
     }
   },
-  mechCost(p) { const amph = R.mechAmphibious(p); return (t) => (this.isLand(t) ? (this.wallHp[t] && this.owner[t] !== p.smallID ? 3 : 1) : amph && this.isWater(t) ? 2.5 : 0); },
+  mechCost(p) { const amph = R.mechCrossesWater(p); return (t) => (this.isLand(t) ? (this.wallHp[t] && this.owner[t] !== p.smallID ? 3 : 1) : amph && this.isWater(t) ? 2.5 : 0); },
   mechPathTo(m, tile) {
     const path = astar(this, [this.tileAt(m.x, m.y)], tile, this.mechCost(m.owner), { maxIter: 150000 });
     if (path && path.length > 1) { m.pts = resamplePath(this, path, 1); m.idx = 0; }
@@ -144,6 +145,7 @@ module.exports = {
       const p = m.owner;
       if (!p.alive) { m.done = true; continue; }
       if (m.hp <= 0) { m.done = true; this.events.push({ k: 'mechLost', p: p.smallID, x: m.x, y: m.y }); continue; }
+      if (this.tickRefit('mech', m)) continue;
       const here = this.tileAt(m.x, m.y);
       m.onWater = this.isWater(here);
       // ---- standing orders: re-aim the patrol point periodically ----
@@ -184,7 +186,8 @@ module.exports = {
         const passive = (m.mode === 'hold' || m.mode === 'roam') && (ground === 'own' || ground === 'ally');
         const target = this.mechPickTarget(m, passive);
         if (target) {
-          if (target.kind === 'ship') this.fireShell(p, m, target.obj, 'mechAA', { dmg: 700, speed: 4 });
+          if (target.kind === 'air') this.fireShell(p, m, target.obj, 'flak', { speed: 7, life: 60 });
+          else if (target.kind === 'ship') this.fireShell(p, m, target.obj, 'mechAA', { dmg: cfg.mechShipDamage(p), speed: 4 });
           else this.fireShell(p, m, null, 'mech', { tx: target.x, ty: target.y, structTile: target.structTile ?? -1, dmg: cfg.mechShellDamage(p, m.level), troopKill: cfg.mechTroopKillPerShell(p, m.level), speed: 4, life: 80, level: m.level });
           m.cannonReady = this.tick + cfg.mechCannonCooldown(p);
           m.engagedUntil = this.tick + 40;
@@ -214,6 +217,16 @@ module.exports = {
   // Target priority: hostile mech > hostile structure > hostile ship (amphibious) > densest hostile land patch.
   mechPickTarget(m, passive = false) {
     const p = m.owner, r = m.range, r2 = r * r;
+    // Airborne Mechs are the anti-airship answer: an enemy airship in range comes first, always.
+    if (R.mechAntiAir(p)) {
+      let air = null, ad = r2 * 1.5;
+      for (const a of this.airships) {
+        if (a.done || !this.hostile(p, a.owner)) continue;
+        const d = (a.x - m.x) ** 2 + (a.y - m.y) ** 2;
+        if (d < ad) { ad = d; air = a; }
+      }
+      if (air) return { kind: 'air', obj: air };
+    }
     let best = null, bd = Infinity;
     for (const o of this.mechs) { if (o === m || o.done || !this.hostile(p, o.owner)) continue; const d = (o.x - m.x) ** 2 + (o.y - m.y) ** 2; if (d <= r2 && d < bd) { bd = d; best = { x: o.x, y: o.y }; } }
     if (best) return best;
@@ -225,7 +238,7 @@ module.exports = {
     }
     if (best) return best;
     if (R.mechAmphibious(p) || m.onWater || this.isShore(this.tileAt(m.x, m.y))) {
-      const ship = this.nearestEnemyShip(p, m.x, m.y, r, true, true);
+      const ship = this.nearestEnemyShip(p, m.x, m.y, r * this.config.mechShipRangeMultiplier(p), true, true);
       if (ship) return { kind: 'ship', obj: ship };
     }
     // land: sample points in range, prefer tiles of the strongest hostile owner (bots last)
