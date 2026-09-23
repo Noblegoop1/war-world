@@ -28,7 +28,7 @@ module.exports = {
   },
 
   inspectBuilding(viewer, u) {
-    if (!u) return null;
+    if (!u || !this.canSeeUnit(u, viewer)) return null;
     const cfg = this.config, p = u.owner, rows = [];
     const maxLv = [UnitType.CITY, UnitType.PORT, UnitType.FACTORY, UnitType.LAB].includes(u.type) ? cfg.maxUnitLevel(p, u.type) : 1;
     rows.push(['Owner', p.name]);

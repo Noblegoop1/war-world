@@ -14,6 +14,11 @@ const { sanitizeSettings, PlayerType, TICKS_PER_SECOND } = require('./game/confi
 
 const PORT = Number(process.env.PORT) || 3000;
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
+// Messages a single client may send: a sustained rate and a short burst. Far above anything a human does
+// (the client sends a focus update every 400ms plus clicks), low enough that a broken or hostile client
+// can't starve the tick loop for everyone else.
+const RATE_PER_SEC = 40;
+const RATE_BURST = 120;
 const MIME = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
   '.png': 'image/png', '.ico': 'image/x-icon', '.svg': 'image/svg+xml', '.json': 'application/json',
@@ -72,6 +77,18 @@ class Client {
     this.lobby = null;
     this.player = null; // in-game Player
     this.lastSeen = Date.now();
+    // token bucket: a client that floods us gets its excess dropped instead of lagging everyone's ticks
+    this.tokens = RATE_BURST;
+    this.tokensAt = Date.now();
+    this.warnedAt = 0;
+  }
+  allow() {
+    const now = Date.now();
+    this.tokens = Math.min(RATE_BURST, this.tokens + ((now - this.tokensAt) / 1000) * RATE_PER_SEC);
+    this.tokensAt = now;
+    if (this.tokens >= 1) { this.tokens -= 1; return true; }
+    if (now - this.warnedAt > 5000) { this.warnedAt = now; this.send({ t: 'toast', msg: 'Slow down — too many actions per second' }); }
+    return false;
   }
   send(obj) {
     if (this.ws && this.ws.readyState === 1) {
@@ -140,14 +157,16 @@ class Lobby {
     this.game = game;
     this.starting = false;
     this.paused = false;
-    const full = game.fullState();
-    for (const c of this.clients) c.send({ t: 'start', code: this.code, you: c.player.smallID, state: full, ctl: this.ctl() });
+    for (const c of this.clients) c.send(this.startPayload(c));
     this.timer = setInterval(() => this.loop(), 1000 / TICKS_PER_SECOND);
     console.log(`[${this.code}] game started: ${map.id} ${map.width}x${map.height} seed=${seed} humans=${this.clients.size} nations=${s.nations} bots=${s.bots}`);
   }
   ctl() { return { t: 'ctl', paused: this.paused, speed: this.settings.gameSpeed }; }
 
   loop() {
+    try { this.loopInner(); } catch (e) { console.error(`[${this.code}] loop error`, e); }
+  }
+  loopInner() {
     const game = this.game;
     if (!game || this.paused) return;
     // gameSpeed > 1 runs extra sim ticks per real tick
@@ -168,19 +187,40 @@ class Lobby {
     }
   }
 
+  // Most of a tick is the same for everyone and is serialised once. The parts that differ per player -
+  // events addressed to them, submarines and mines they are allowed to see, their own research offer -
+  // are appended per client. Nothing private ever goes into the shared part.
   sendTick(pkt) {
-    const events = pkt.events;
-    const targeted = events && events.some((e) => e.to);
-    const perClient = targeted || pkt.ships === true;
-    if (!perClient) { this.broadcast(pkt); return; }
-    // some events are private (e.g. "X is attacking you") and submarines are only visible to their owner: filter per client
+    const g = this.game;
+    const events = pkt.events || [];
+    const shipsDue = pkt.ships === true;
+    const unitsDue = !!pkt.units;
+    const shared = { ...pkt };
+    delete shared.events; delete shared.ships; delete shared.units;
+    const body = JSON.stringify(shared);
+    const head = body.slice(0, -1);                    // '{...' without the closing brace
+    const publicEvents = events.filter((e) => !e.to);
+    const publicJson = publicEvents.length ? JSON.stringify(publicEvents) : null;
+    const hasPrivate = publicEvents.length !== events.length;
+    const privateInfo = pkt.stats !== undefined;     // refresh private state alongside the stats cadence
     for (const c of this.clients) {
       if (!c.ws || c.ws.readyState !== 1) continue;
-      if (events) pkt.events = events.filter((e) => !e.to || e.to === c.id);
-      if (pkt.ships === true || Array.isArray(pkt.ships)) pkt.ships = this.game.shipsPacket(c.player);
-      c.send(pkt);
+      let s = head;
+      if (hasPrivate) {
+        const mine = events.filter((e) => !e.to || e.to === c.id);
+        if (mine.length) s += ',"events":' + JSON.stringify(mine);
+      } else if (publicJson) s += ',"events":' + publicJson;
+      if (shipsDue) s += ',"ships":' + JSON.stringify(g.shipsPacket(c.player));
+      if (unitsDue) s += ',"units":' + JSON.stringify(g.unitsPacket(c.player));
+      if (privateInfo && c.player) s += ',"me":' + JSON.stringify(g.privatePacket(c.player));
+      s += '}';
+      try { c.ws.send(s); } catch (_) { /* ignore */ }
     }
-    pkt.events = events;
+  }
+  startPayload(c) {
+    const g = this.game;
+    const state = g.fullState(c.player);
+    return { t: 'start', code: this.code, you: c.player.smallID, state, me: g.privatePacket(c.player), ctl: this.ctl() };
   }
 
   endGame() {
@@ -202,8 +242,19 @@ class Lobby {
       console.log(`[${this.code}] closed`);
       return;
     }
-    if (this.host === c) this.host = [...this.clients][0];
+    if (this.host === c) this.host = [...this.clients].find((x) => x.ws && x.ws.readyState === 1) || [...this.clients][0];
     this.broadcastLobby();
+  }
+  // A host who drops mid-game would leave nobody able to pause, change speed or end it.
+  // Hand host to someone still connected; if the old host comes back they play on as a normal player.
+  hostWentAway(c) {
+    if (this.host !== c) return;
+    const next = [...this.clients].find((x) => x !== c && x.ws && x.ws.readyState === 1);
+    if (!next) return;
+    this.host = next;
+    this.broadcast({ t: 'toast', msg: `${next.name} is now the host`, info: true });
+    this.broadcastLobby();
+    if (this.inGame) this.broadcast(this.ctl());
   }
 
   handleIntent(c, m) {
@@ -367,7 +418,15 @@ wss.on('connection', (ws) => {
   ws.on('message', (raw) => {
     let m;
     try { m = JSON.parse(raw); } catch (_) { return; }
-    if (!m || typeof m !== 'object') return;
+    if (!m || typeof m !== 'object' || Array.isArray(m) || typeof m.t !== 'string') return;
+    if (client && !client.allow()) return;
+    try { onMessage(m); } catch (e) {
+      // A throw here would be an uncaught exception in an event handler, which takes the whole process -
+      // every lobby on the server - down with it. Log it and carry on.
+      console.error('message error', m && m.t, e);
+    }
+  });
+  const onMessage = (m) => {
 
     if (m.t === 'hello') {
       const token = typeof m.token === 'string' && m.token.length >= 8 && m.token.length <= 64 ? m.token : crypto.randomBytes(16).toString('hex');
@@ -384,7 +443,7 @@ wss.on('connection', (ws) => {
         if (l.game && client.player) {
           client.player.disconnected = false;
           client.send({ t: 'lobby', lobby: l.summary() });
-          client.send({ t: 'start', code: l.code, you: client.player.smallID, state: l.game.fullState(), ctl: l.ctl() });
+          client.send(l.startPayload(client));
         } else {
           client.send({ t: 'lobby', lobby: l.summary() });
         }
@@ -465,13 +524,14 @@ wss.on('connection', (ws) => {
       default:
         if (client.lobby) client.lobby.handleIntent(client, m);
     }
-  });
+  };
   ws.on('close', () => {
     if (!client || client.ws !== ws) return;
     client.ws = null;
     if (client.player) client.player.disconnected = true;
-    if (client.lobby) client.lobby.broadcastLobby();
+    if (client.lobby) { client.lobby.hostWentAway(client); client.lobby.broadcastLobby(); }
   });
+  ws.on('error', () => { /* the close handler does the bookkeeping */ });
 });
 
 // Drop clients that have been gone for a long time.

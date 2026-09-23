@@ -345,10 +345,15 @@ function myHas(id) { const p = me(); return !!(p && p.researches && p.researches
 
 // Smooth motion: mobiles report a position every tick (100ms); we interpolate toward it on each frame.
 const lerpState = new Map();
+setInterval(() => {
+  const cutoff = performance.now() - 5000;
+  for (const [id, s] of lerpState) if ((s.seen ?? s.at) < cutoff) lerpState.delete(id);
+}, 5000);
 function lerpPos(id, x, y) {
   const now = performance.now();
   let s = lerpState.get(id);
-  if (!s) { s = { x, y, tx: x, ty: y, at: now }; lerpState.set(id, s); return [x, y]; }
+  if (!s) { s = { x, y, tx: x, ty: y, at: now, seen: now }; lerpState.set(id, s); return [x, y]; }
+  s.seen = now;
   if (s.tx !== x || s.ty !== y) { s.x = s.dx ?? s.tx; s.y = s.dy ?? s.ty; s.tx = x; s.ty = y; s.at = now; }
   const k = clamp((now - s.at) / 120, 0, 1);
   s.dx = s.x + (s.tx - s.x) * k; s.dy = s.y + (s.ty - s.y) * k;
@@ -381,6 +386,7 @@ function startGame(m) {
     G.players.set(p.sm, { ...p, rgb, border, borderHex: rgbToHex(border), troops: 0, gold: 0, tiles: 0, flags: 0, maxTroops: 0, allies: [], income: 0, researches: [] });
   }
   applyStats(s.stats);
+  applyPrivate(m.me);
   setUnits(s.units || []);
   G.attacks = []; G.boats = []; G.trade = []; G.nukes = []; G.allyReqs = []; G.effects = [];
   G.winner = s.winner || 0;
@@ -516,11 +522,10 @@ function applyStats(stats) {
     p.troops = s[1]; p.gold = s[2]; p.tiles = s[3]; p.flags = s[4]; p.maxTroops = s[5]; p.allies = s[6] || []; p.income = s[7] || 0;
     const r = s[8] || [[], null, null];
     p.income2 = s[19] || null;   // [base, land, cities, peace, trade, train, conquest, plunder] per second
-    p.researches = r[0] || []; p.researching = r[1]; p.choices = r[2];
+    p.researches = r[0] || []; p.researching = r[1];
     p.atk = s[9] || 0; p.eco = s[10] || 0; p.walls = s[11] || 0; p.mechCount = s[12] || 0; p.warshipCount = s[13] || 0; p.subCount = s[14] || 0;
     p.deployed = s[15] || 0; p.airships = s[16] || 0; p.airshipsBuilt = s[17] || 0; p.maxResearch = s[18] || 2;
     p.spawned = !!(s[4] & 1); p.alive = !!(s[4] & 2); p.traitor = !!(s[4] & 4); p.offline = !!(s[4] & 8);
-    if (p.sm === G.me && p.choices && p.choices.length && !researchPickerOpen && !researchDismissed) openResearchPicker(p.choices);
   }
 }
 function setUnits(list) {
@@ -528,6 +533,14 @@ function setUnits(list) {
   G.unitByTile = new Map();
   for (const u of list) G.unitByTile.set(u[3], u);
   rebuildFortified();
+}
+// Private state for this player only (the server never sends it to anyone else).
+function applyPrivate(me) {
+  if (!me) return;
+  const p = G.players.get(G.me);
+  if (!p) return;
+  p.choices = me.choices || null;
+  if (p.choices && p.choices.length && !researchPickerOpen && !researchDismissed) openResearchPicker(p.choices);
 }
 function applyTick(m) {
   if (!G.active) return;
@@ -551,6 +564,7 @@ function applyTick(m) {
   if (m.bombers) G.bombers = m.bombers;
   if (m.rails) G.rails = m.rails;
   if (m.allyReqs) syncAllyRequests(m.allyReqs.filter((r) => r[1] === net.id).map((r) => r[0]));
+  if (m.me) applyPrivate(m.me);
   if (m.events) for (const e of m.events) handleEvent(e);
   if (m.winner !== undefined) G.winner = m.winner;
   if (prevPhase !== 'over' && G.phase === 'over') showGameOver();
