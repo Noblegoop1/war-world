@@ -57,8 +57,8 @@ colour** in pure grey **RGB 180,180,180**, the **darker border colour** in **RGB
 | Attack front marker | `public/assets/icons/SwordIconWhite.svg` exists (OpenFront). Custom optional. | Crossed swords + troop count that follows each attack's front. |
 | Artillery Battery | `public/assets/icons/ArtilleryIcon.svg` + optional `public/assets/sprites/artillery.png` | Currently a triangle with the sword glyph. Wants a muzzle-flash VFX and a shell-in-flight sprite. |
 | Repair Yard | `public/assets/icons/RepairIcon.svg` | Currently a diamond with the troop glyph. A repair "pulse" VFX over healed mechs/walls would read well. |
-| Airship | `public/assets/sprites/airship.png` | Currently an owner-coloured lozenge with a fin, drawn deliberately unlike any boat. 16-24px, side-on. |
-| Airport | `public/assets/icons/AirportIcon.svg` | Currently a diamond with the boat glyph. |
+| ~~Airship~~ | `public/assets/icons/AirshipIconWhite.png` | **Done** — supplied by you. Keyed to white-on-transparent and tinted to the owner's colour on the map, with a dark copy behind it for an outline. |
+| ~~Airport~~ | `public/assets/icons/AirportIconWhite.png` | **Done** — supplied by you. Keyed to white-on-transparent; the client tints it like any other icon. |
 | Fallout / radiation | `public/assets/tiles/fallout.png` | Currently a flat green-grey scar with a checker dither. A tileable radiated texture (and a slow shimmer) would sell it far better. |
 | Mech order badges | — | ROAM / DEFEND / ASSAULT are drawn as text chips under the mech. Small icons would be nicer. |
 | Fortified border | — | Border tiles under a defense post are drawn in pale stone. A proper battlement texture would be better. |
@@ -72,6 +72,12 @@ colour** in pure grey **RGB 180,180,180**, the **darker border colour** in **RGB
 * Favicon (`public/favicon.ico`).
 
 ---
+
+**Raster icons:** drop a dark-on-light PNG in and say which unit it is — the converter at
+`tools/mkicon.js` keys the background out by luminance, forces the shape white, trims the margin
+and re-encodes, which is how the Airport and Airship icons were made. Icon filenames carrying an
+extension (e.g. `AirportIconWhite.png`) are loaded as-is; anything without one is assumed to be `.svg`.
+Non-square art is fitted, not stretched.
 
 **When you hand me files:** tell me the path you used. Sprite sheets should be a single horizontal strip
 of equal-width frames (e.g. 8 frames of 16×16 = 128×16) — say the frame count and I'll set the timing.

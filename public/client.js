@@ -60,6 +60,8 @@ const ICON_FILES = {
   allyReq: 'AllianceRequestWhiteIcon', traitor: 'TraitorIconWhite', donateGold: 'DonateGoldIconWhite', donateTroop: 'DonateTroopIconWhite',
   build: 'BuildIconWhite', info: 'InfoIconSolidWhite', crown: 'CrownIcon', target: 'TargetIconWhite', troops: 'TroopIconWhite', x: 'XIcon',
   trade: 'TradeShipIconWhite', population: 'PopulationIconSolidWhite', explosion: 'ExplosionIconWhite', disconnected: 'DisconnectedIcon', back: 'XIcon',
+  // supplied as raster art rather than the OpenFront SVG set, so they carry their extension
+  airport: 'AirportIconWhite.png', airship: 'AirshipIconWhite.png',
 };
 const SPRITE_FILES = { transport: 'transportship', warship: 'warship', trade: 'tradeship', atom: 'atombomb', hydrogen: 'hydrogenbomb', samMissile: 'samMissile', trainEngine: 'trainEngine', trainCar: 'trainCarriage' };
 const icons = {};
@@ -74,18 +76,40 @@ function loadAssets() {
       im.onload = () => {
         const c = document.createElement('canvas'); c.width = 64; c.height = 64;
         const x = c.getContext('2d');
-        x.drawImage(im, 0, 0, 64, 64);
+        // fit rather than stretch: the airship is twice as wide as it is tall and squashing it into a
+        // square turns it into a balloon
+        const k = Math.min(64 / im.width, 64 / im.height);
+        const w = im.width * k, h = im.height * k;
+        x.drawImage(im, (64 - w) / 2, (64 - h) / 2, w, h);
         if (name !== 'crown') { x.globalCompositeOperation = 'source-in'; x.fillStyle = '#fff'; x.fillRect(0, 0, 64, 64); }
         icons[name] = c; iconURL[name] = c.toDataURL(); resolve();
       };
       im.onerror = () => resolve();
-      im.src = `/assets/icons/${file}.svg`;
+      im.src = `/assets/icons/${file}${file.includes('.') ? '' : '.svg'}`;
     }));
   }
   for (const [name, file] of Object.entries(SPRITE_FILES)) {
     tasks.push(new Promise((resolve) => { const im = new Image(); im.onload = () => { sprites[name] = im; resolve(); }; im.onerror = () => resolve(); im.src = `/assets/sprites/${file}.png`; }));
   }
   return Promise.all(tasks);
+}
+// An icon recoloured to a nation's colour. Same trick the loader uses to force them white, just with
+// the owner's colour instead, cached per colour.
+const tintCache = new Map();
+function tintedIcon(name, colorHex) {
+  const key = `${name}|${colorHex}`;
+  let c = tintCache.get(key);
+  if (c) return c;
+  const src = icons[name];
+  if (!src) return null;
+  c = document.createElement('canvas'); c.width = src.width; c.height = src.height;
+  const x = c.getContext('2d');
+  x.drawImage(src, 0, 0);
+  x.globalCompositeOperation = 'source-in';
+  x.fillStyle = colorHex;
+  x.fillRect(0, 0, c.width, c.height);
+  tintCache.set(key, c);
+  return c;
 }
 function coloredSprite(name, colorHex, borderHex) {
   const key = `${name}|${colorHex}`;
@@ -135,7 +159,7 @@ const NUKE_INFO = {
 };
 const HOTBAR = ['city', 'port', 'factory', 'defense', 'silo', 'sam', 'lab', 'wall', 'mech', 'warship'];
 const HOTBAR2 = ['artillery', 'repair', 'airport', 'airship', 'atom', 'hydrogen', 'submarine', 'mine', 'bomber'];
-const ICON_FOR = { city: 'city', port: 'port', factory: 'factory', defense: 'defense', silo: 'silo', sam: 'sam', lab: 'info', wall: 'build', mech: 'target', warship: 'warship', submarine: 'warship', mine: 'mine', bomber: 'explosion', atom: 'atom', hydrogen: 'hydrogen', artillery: 'sword', repair: 'troops', airport: 'boat', airship: 'boat' };
+const ICON_FOR = { city: 'city', port: 'port', factory: 'factory', defense: 'defense', silo: 'silo', sam: 'sam', lab: 'info', wall: 'build', mech: 'target', warship: 'warship', submarine: 'warship', mine: 'mine', bomber: 'explosion', atom: 'atom', hydrogen: 'hydrogen', artillery: 'sword', repair: 'troops', airport: 'airport', airship: 'airship' };
 let RESEARCH_DEFS = [];
 
 // =============================================================================
@@ -1455,20 +1479,22 @@ function draw() {
     const [lx, ly] = lerpPos('air' + id, ax, ay);
     const [x, y] = toScreen(lx, ly);
     if (!visible(x, y)) continue;
+    // the blimp points where it is going; a dark copy underneath gives it an outline against the sea
     const ang = Math.atan2(ty - ly, tx - lx);
-    const w = clamp(9 * cam.zoom, 14, 34), h = w * 0.42;
-    ctx.save(); ctx.translate(x, y); ctx.rotate(ang);
-    ctx.beginPath(); ctx.ellipse(0, 0, w / 2, h / 2, 0, 0, Math.PI * 2);
-    ctx.fillStyle = q ? q.color : '#fff'; ctx.fill();
-    ctx.lineWidth = 2; ctx.strokeStyle = '#1b1f26'; ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(-w * 0.1, h / 2); ctx.lineTo(w * 0.1, h / 2); ctx.lineTo(0, h * 0.95); ctx.closePath();
-    ctx.fillStyle = '#1b1f26'; ctx.fill();
+    const flip = Math.abs(ang) > Math.PI / 2;   // keep the nose forward instead of flying upside down
+    const size = clamp(11 * cam.zoom, 18, 44);
+    const body = tintedIcon('airship', q ? q.color : '#ffffff');
+    const shade = tintedIcon('airship', '#11151b');
+    ctx.save(); ctx.translate(x, y); ctx.rotate(flip ? ang + Math.PI : ang); if (flip) ctx.scale(1, -1);
+    if (shade) ctx.drawImage(shade, -size / 2 - 1.5, -size / 2 - 1.5, size + 3, size + 3);
+    if (body) ctx.drawImage(body, -size / 2, -size / 2, size, size);
     ctx.restore();
     if (cam.zoom > 1) {
       ctx.font = `bold ${clamp(4 * cam.zoom, 10, 15)}px system-ui, sans-serif`;
       ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
       ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(0,0,0,0.8)'; ctx.fillStyle = '#fff';
-      ctx.strokeText(fmt(troops), x, y - h); ctx.fillText(fmt(troops), x, y - h);
+      const off = clamp(11 * cam.zoom, 18, 44) * 0.3;
+      ctx.strokeText(fmt(troops), x, y - off); ctx.fillText(fmt(troops), x, y - off);
     }
   }
   // nukes on their arcs
