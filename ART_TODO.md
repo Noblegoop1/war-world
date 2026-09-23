@@ -71,6 +71,9 @@ colour** in pure grey **RGB 180,180,180**, the **darker border colour** in **RGB
 ## UI polish (nice-to-have)
 
 * Custom ATK POWER / ECONOMY badge icons (currently ⚔ and 💰 emoji).
+* Declare war / Make peace radial icons (currently reuse the sword and handshake icons; the nation card
+  uses ⚔ and 🕊 emoji) — `public/assets/icons/WarIcon.svg`, `PeaceIcon.svg`, white silhouettes 24×24.
+* "Hide / Show doctrines" button on the research picker is plain text; an eye / eye-off icon would suit it.
 * Nation card background texture.
 * Game logo for the menu (currently plain text "WAR WORLD").
 * Favicon (`public/favicon.ico`).

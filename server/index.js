@@ -389,6 +389,16 @@ class Lobby {
         if (o) g.replyAlliance(p, o, !!m.accept);
         break;
       }
+      case 'declareWar': {
+        const r = g.declareWar(p, g.playersBySmall[Number(m.p)]);
+        if (!r.ok) c.send({ t: 'toast', msg: r.reason });
+        break;
+      }
+      case 'makePeace': {
+        const r = g.makePeace(p, g.playersBySmall[Number(m.p)]);
+        if (!r.ok) c.send({ t: 'toast', msg: r.reason });
+        break;
+      }
       case 'breakAlly': {
         const o = g.playersBySmall[Number(m.p)];
         if (o) g.breakAlliance(p, o);

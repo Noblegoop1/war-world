@@ -91,9 +91,10 @@ module.exports = {
       for (const q of this.players) {
         if (!q.alive || q === p || p.isFriendly(q) || !R.interceptsAirships(q)) continue;
         if (a.checked.has(q.smallID)) continue;
-        const range = cfg.interceptorRange(q);
-        const near = q.units.some((u) => (u.type === UnitType.AIRPORT || u.type === UnitType.CITY || u.type === UnitType.SAM)
-          && u.constructionLeft === 0 && Math.hypot(this.x(u.tile) + 0.5 - a.x, this.y(u.tile) + 0.5 - a.y) <= range);
+        // Interceptors fly from SAM sites (their normal range) and the Airport - not from every city.
+        const near = q.units.some((u) => u.constructionLeft === 0
+          && ((u.type === UnitType.SAM && Math.hypot(this.x(u.tile) + 0.5 - a.x, this.y(u.tile) + 0.5 - a.y) <= cfg.samRange(q))
+            || (u.type === UnitType.AIRPORT && Math.hypot(this.x(u.tile) + 0.5 - a.x, this.y(u.tile) + 0.5 - a.y) <= cfg.interceptorRange(q))));
         if (!near) continue;
         a.checked.add(q.smallID);
         if (this.rng.next() < cfg.interceptorKillChance(q)) {

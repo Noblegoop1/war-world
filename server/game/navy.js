@@ -28,16 +28,21 @@ module.exports = {
     shore.sort((a, b) => this.dist(a, dst) - this.dist(b, dst));
     const starts = [];
     const seen = new Set();
-    for (const t of shore.slice(0, 300)) for (const w of this.waterNeighborsOf(t)) if (!seen.has(w)) { seen.add(w); starts.push(w); }
+    // only start from water that is actually the same sea as the destination; if there is none, there is
+    // no route, and we know it without searching
+    const seas = new Set([...goals].map((w) => this.waterBody[w]));
+    for (const t of shore.slice(0, 300)) for (const w of this.waterNeighborsOf(t)) if (!seen.has(w) && seas.has(this.waterBody[w])) { seen.add(w); starts.push(w); }
+    if (!starts.length) return null;
     const path = astar(this, starts, (t) => goals.has(t), (t) => this.waterCost(t), { heuristicTo: dst, maxIter });
     if (!path) return null;
     path.push(dst);
     return path;
   },
   findWaterPathBetween(aTile, bTile, maxIter = 250000) {
-    const starts = this.isWater(aTile) ? [aTile] : this.waterNeighborsOf(aTile);
     const goals = new Set(this.isWater(bTile) ? [bTile] : this.waterNeighborsOf(bTile));
-    if (!starts.length || !goals.size) return null;
+    const seas = new Set([...goals].map((w) => this.waterBody[w]));
+    const starts = (this.isWater(aTile) ? [aTile] : this.waterNeighborsOf(aTile)).filter((w) => seas.has(this.waterBody[w]));
+    if (!starts.length || !goals.size) return null;   // different seas: no route, no search
     return astar(this, starts, (t) => goals.has(t), (t) => this.waterCost(t), { heuristicTo: bTile, maxIter });
   },
   shoreTilesNear(start, ownerSm, limit = 8, maxDepth = 120) {
@@ -71,7 +76,10 @@ module.exports = {
   },
 
   // ---- transport boats ------------------------------------------------------------
-  sendBoat(p, clickedTile, troops) {
+  // `budget` bounds the route search. Humans get the full search - they clicked a coast and expect a boat -
+  // while the AI's speculative launches pass a small one, so a nation idly probing a far-off shore can't
+  // stall every player's tick while the pathfinder crosses an ocean.
+  sendBoat(p, clickedTile, troops, budget = null) {
     if (!p.alive || this.settings.disableBoats) return null;
     if (p.boats.filter((x) => !x.done).length >= this.config.boatMaxNumber(p)) return null;
     let landTile = clickedTile;
@@ -101,8 +109,10 @@ module.exports = {
     if (target === p) return null;
     if (!this.canAttack(p, target)) return null;
     let path = null, dst = null;
+    let tries = budget ? budget.tries : Infinity;
     for (const cand of this.shoreTilesNear(landTile, this.owner[landTile])) {
-      path = this.findWaterPathFromCoast(p, cand);
+      if (tries-- <= 0) break;
+      path = this.findWaterPathFromCoast(p, cand, budget ? budget.maxIter : undefined);
       if (path) { dst = cand; break; }
     }
     if (!path) return null;
@@ -327,7 +337,7 @@ module.exports = {
     if (!this.isWater(tile)) return { ok: false, reason: 'Set the patrol point on water' };
     const ports = p.completedUnitsOf(UnitType.PORT);
     if (!ports.length) return { ok: false, reason: 'You need a Port to launch warships' };
-    if (p.warships.filter((w) => !w.done).length >= R.warshipCap(p)) return { ok: false, reason: `Warship limit reached (${R.warshipCap(p)})` };
+    if (p.warships.filter((w) => !w.done).length >= this.config.warshipCap(p)) return { ok: false, reason: `Warship limit reached (${this.config.warshipCap(p)})` };
     const cost = this.config.unitCost(UnitType.WARSHIP, p.warships.length, p);
     if (p.gold < cost) return { ok: false, reason: `Not enough gold (need ${Math.floor(cost).toLocaleString()})` };
     ports.sort((a, b) => this.dist(a.tile, tile) - this.dist(b.tile, tile));
@@ -424,7 +434,8 @@ module.exports = {
     if (!this.isWater(tile)) return { ok: false, reason: 'Set the patrol point on water' };
     const ports = p.completedUnitsOf(UnitType.PORT);
     if (!ports.length) return { ok: false, reason: 'You need a Port to launch submarines' };
-    if (p.subs.filter((s) => !s.done).length >= 3) return { ok: false, reason: 'Submarine limit reached (3)' };
+    const subCap = this.config.submarineCap(p);
+    if (p.subs.filter((s) => !s.done).length >= subCap) return { ok: false, reason: `Submarine limit reached (${subCap}) - a level-3 Port raises it` };
     const cost = this.config.unitCost(UnitType.SUBMARINE, p.subs.length, p);
     if (p.gold < cost) return { ok: false, reason: `Not enough gold (need ${Math.floor(cost).toLocaleString()})` };
     ports.sort((a, b) => this.dist(a.tile, tile) - this.dist(b.tile, tile));

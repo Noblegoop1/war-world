@@ -29,7 +29,8 @@ Open <http://localhost:3000>, pick a name, **Create game**, choose a map, **Star
   The **attack ratio** (slider, number keys, or **Shift**+scroll) sets how many troops each click
   commits. Push too fast and you'll bleed out — let troops regrow between attacks. If a target isn't
   reachable by land, a transport boat is sent automatically.
-* **Right-click** opens a **radial menu**: Build, Boat, Alliance / Donate / Break, and Info. Build
+* **Right-click** opens a **radial menu**: Build, Boat, Alliance / Donate / Break, **Declare war** /
+  **Make peace**, and Info. Build
   again from the wrench for the full structure ring.
 * **Build** (keys **1-0** or the bottom bar, then click a tile):
   * **City** — +250K max troops. Build on it again to upgrade. Joins the rail network when a
@@ -52,8 +53,9 @@ Open <http://localhost:3000>, pick a name, **Create game**, choose a map, **Star
     attack is closest. It never takes ground.
   * **Airport** — one per nation and enormously expensive. It flies **Airships**: each carries 5% of
     your troops (10% with Strategic Airlift) over SAMs, warships and coastal defenses and drops them
-    on any land tile in range. SAMs cannot touch one and warships cannot reach one; only an enemy
-    **Interceptor Screen** brings them down. Max 3 in the air, each costing more than the last. The
+    on any land tile in range. SAMs cannot touch one and warships cannot reach one. The counters: a nation with
+    **Interceptor Screen** gets a 45% shot at each airship that passes within range of its SAMs or its
+    Airport, and **Airborne Mechs** shoot them down. Max 3 in the air, each costing more than the last. The
     catch is that your own SAMs cannot sit within 70 tiles of your Airport unless you research
     **Airbase Network** — opening the sky for your planes opens it for everyone's missiles.
   * **Repair Yard** (needs Field Engineering) — heals your Mechs and rebuilds damaged wall tiles
@@ -93,6 +95,8 @@ Open <http://localhost:3000>, pick a name, **Create game**, choose a map, **Star
 * **Research Lab** (key **7**) — needs **3 Cities**, must be within rail range of a Factory, and
   away from Cities. When ready it offers **3 random doctrines** (TFT-augment style); pick one and it
   takes **3–5 minutes** depending on how strong it is (the card says which), then the lab cools down.
+  **Hide doctrines** (under the cards) tucks the offer away so you can look around the map first;
+  **Show doctrines** brings it back.
   **Upgrade the lab** (up to level 3) to research faster — ×0.8, then ×0.65 of the time; a 5-minute
   doctrine never drops below ~3¼ minutes. Each lab is worth **two doctrines**, and every extra lab
   costs **five times** the last. **Lose the lab and the research dies with it**: bomb it, nuke it or
@@ -118,6 +122,20 @@ Open <http://localhost:3000>, pick a name, **Create game**, choose a map, **Star
   aimed at the launchers; airlifts draw Interceptor Screen; navies draw Coastal Defense and
   Amphibious Mechs. Its missiles are routed around SAM umbrellas along their real flight path, and
   it paces strikes so games don't turn into wastelands.
+  Underneath that is a **word memory**. Each AI looks at the nations around it (Easy now and then,
+  Hard most of the time, **Impossible every look and every nation on the map**) and writes short words
+  about each one with a confidence from 0 to 100%: *city_clump*, *clump_uncovered*, *sam_clump*,
+  *no_air_defense*, *econ_buff*, *airship_threat*, *navy_heavy*, *betrayed_me*, *ally_winning*,
+  *easy_prey*, *danger* and about eighty more. Words it stops seeing fade and are forgotten. Every
+  choice is tagged with the words that make it worth doing: each doctrine lists the words it answers,
+  the clump strike wants *city_clump + clump_uncovered + danger*, retaliation weighs *betrayed_me* or
+  *nuked_me* against *strong_army* and *busy* — and only strikes back when the odds are good. What
+  the objective words say about a nation is computed once and shared by every AI, so the whole thing
+  costs a few milliseconds a tick.
+  Allied AIs **tag-team**: if an ally is fighting a nation the AI can reach, it sends a little help;
+  if the ally is clearly winning it joins the rush to grab the land. The AI **allies more eagerly in
+  the first five minutes**, declares war on the neighbour its words rate most worth it when it is
+  ready for war, and makes peace when it is losing or needs to turtle.
 * **Colonising** — empty landmasses, including **small islands**, are worth taking. AI nations run a periodic scan for unclaimed
   regions and ship troops to the best one, scoring by size, distance and how isolated it is, so places
   like Greenland and Antarctica get settled instead of sitting empty all game. The harder the AI, the
@@ -134,7 +152,19 @@ Open <http://localhost:3000>, pick a name, **Create game**, choose a map, **Star
   times the gold, so conquest alone doesn't run away with it), and **Cities**, which pay by level
   (0.7K/s at level 1, 2.5K/s at level 3, a big jump at level 4). Go 90 seconds without attacking a
   nation and a **peace dividend** multiplies all of that by 1.3. Trade ships between **allies** pay
-  50% more. Hover your gold for a live breakdown by source.
+  both sides **15% more**. Hover your gold for a live breakdown by source.
+* **Prices** — Cities, Ports and Factories double in price with each one you own (125K, 250K, …)
+  up to 2M. Defense Posts 75K each more (max 600K), SAMs 1.5M then 3M, Silo 1.5M, Airport 8M,
+  Warships 300K each more (max 1.5M), Submarines 750K each more (max 3M), Mechs 2M + 2.5M per mech
+  already owned. Every price shown in the build bar comes from the server, doctrine discounts included.
+* **Unit caps** — you can field 3 Mechs, 3 Warships, 2 Submarines and 3 Airships (some doctrines
+  raise these). **Every level-3 Port adds one Warship and one Submarine to the cap, and every level-3
+  Factory adds one Mech**; a level-4 building (Heavy Industry) adds one more. Levelling production is
+  how a navy or mech corps grows.
+* **Declaring war** (radial on their land, or the nation card) — your attacks on that nation carry
+  **15% more troops**, but your passive income drops **20%** while any war you declared lasts. A war
+  runs at least 60 seconds before you can **make peace**, and allying the nation ends it. The target
+  is told, and the nation card shows who is at war with whom.
 * **Conquering** a nation or tribe pays **half its treasury** + 10K + 15 per tile. Tribes start
   weak, grow a little, and stay weak.
 * **Expansion** uses OpenFront's frontier priority (terrain + already-owned neighbours + a little
@@ -143,9 +173,10 @@ Open <http://localhost:3000>, pick a name, **Create game**, choose a map, **Star
 * **Nation info card** — hover or click any nation: besides gold/troops/land it shows two headline
   numbers. **ATK POWER** = troops at home + Mechs + navy + silos + defenses + military research,
   and it **drops while that nation's forces are away fighting**. **ECONOMY** = gold per second from
-  land, trade ports, trains and research.
-* **Alliances** — request from a player's radial or the leaderboard. Allies can't attack each other
-  and can donate troops/gold. Breaking one marks you a **traitor** for 30s (weaker defense). Nuking
+  base, land, Cities, trade ships, trains, conquest and plunder. **Hover either number** — on any
+  nation, AI or human — for the full breakdown, including peace-dividend and war penalties.
+* **Alliances** — request from a player's radial or the leaderboard. Allies can't attack each other,
+  can donate troops/gold, and earn 15% more from trade with each other. Breaking one marks you a **traitor** for 30s (weaker defense). Nuking
   an ally breaks the alliance.
 * **Win** by owning 80% of the land (configurable). Any player squeezed under 100 tiles is
   conquered outright — the attacker takes their land and gold.
@@ -201,7 +232,15 @@ is the only place game state lives, so nothing can be cheated from the page. Cli
 ("attack this tile with 20%", "build a city here") and receive small per-tick deltas (which tiles
 changed owner, plus stats every half-second). A full snapshot is sent only when you join or
 reconnect. Reconnecting keeps your seat (a per-tab token); while you're gone your nation keeps
-running. The host can pause, change speed, or end the game for everyone.
+running. The host can pause, change speed, or end the game for everyone; if the host leaves, control
+passes to the next player still connected.
+
+What each player receives is filtered for them: your doctrine choices, prices and unit caps, your own
+submarines and naval mines (enemies can't see them), and messages meant for you go only to you. Every
+player gets a distinct colour however many join. Every command is checked against the player who
+sent it (you can only move, refit or recall your own units), clients are rate-limited so one can't
+flood the server, and a bad message or an error inside one tick is logged and skipped instead of
+taking the game down. Tested with 64 human clients in one game.
 
 ## Host it on a website
 
@@ -245,7 +284,9 @@ server/game/inspect.js The numbers behind every Info panel, computed from the li
 server/game/research.js  The 42 doctrines, their tooltip lines, and every multiplier they apply
 server/game/path.js    8-connected A* (octile), path resampling, Bezier helpers
 server/game/ai.js      Nation AI (research-driven; factories, mechs + standing orders, navy,
-                       colonising empty landmasses, choke-point walls, nukes, bombers) and bot AI
+                       colonising empty landmasses, choke-point walls, nukes, bombers, wars,
+                       word memory of every rival) and bot AI
+server/game/intel.js   The AI vocabulary: what a nation looks like from outside, as words
 public/                Client: menu/lobby UI, canvas renderer, radial menu, research picker, input
 public/assets/         OpenFront icons & sprites (CC BY-SA 4.0)
 server/maps/           Five bundled OpenFront maps (CC BY-SA 4.0)

@@ -118,6 +118,7 @@ class Player {
     this.connectedFactories = 0;
     this.lastNukedBy = null;
     this.lastOffenseTick = -1e9;   // last time we attacked a nation (peace dividend)
+    this.warsDeclared = new Map(); // smallID -> tick we declared war on them
     this.incomeBucket = {};        // gold earned this second, by source
     this.incomeRate = {};          // smoothed gold per second, by source
   }
@@ -211,6 +212,7 @@ class Game {
     this.fallout = new Uint8Array(this.width * this.height);
     this.falloutTiles = new Set();
     this.buildLandmasses();
+    this.buildWaterBodies();
     this.wallHp = new Uint16Array(this.width * this.height);
     this.numFallout = 0;
     this.rng = new Rng((map.seed ^ 0x5bd1e995) >>> 0);
@@ -360,6 +362,33 @@ class Game {
       id++;
     }
     this.numLandmasses = id;
+  }
+  // The same for water: every water tile gets the id of the sea it belongs to. A boat can only sail
+  // between coasts on the same sea, and knowing that up front turns an impossible route into an instant
+  // "no" instead of a pathfinder searching hundreds of thousands of tiles to find out (that search, retried
+  // for several landing spots, was a ~750ms stall for every player in the game).
+  buildWaterBodies() {
+    const n = this.width * this.height;
+    this.waterBody = new Int32Array(n).fill(-1);
+    const queue = new Int32Array(n);
+    const b = [0, 0, 0, 0];
+    let id = 0;
+    for (let start = 0; start < n; start++) {
+      if (this.waterBody[start] !== -1 || this.isLand(start)) continue;
+      let head = 0, tail = 0;
+      queue[tail++] = start; this.waterBody[start] = id;
+      while (head < tail) {
+        const t = queue[head++];
+        const m = this.neighbors4(t, b);
+        for (let k = 0; k < m; k++) {
+          const nb = b[k];
+          if (this.waterBody[nb] !== -1 || this.isLand(nb)) continue;
+          this.waterBody[nb] = id;
+          queue[tail++] = nb;
+        }
+      }
+      id++;
+    }
   }
   // Does this player hold ground on the same landmass as `tile`? Sampled from their border, which is
   // where an attack would start from anyway.
@@ -554,6 +583,7 @@ class Game {
           p.incomeRate[k] = (p.incomeRate[k] || 0) * (1 - INCOME_SMOOTHING) + perSec * INCOME_SMOOTHING;
         }
         p.incomeBucket = {};
+        p.incomeSamples = (p.incomeSamples || 0) + 1;
       }
     }
     for (const u of this.units) {
@@ -638,6 +668,8 @@ class Game {
     if (troops < 1) return null;
     p.removeTroops(troops);
     if (target && target.type !== PlayerType.BOT) p.lastOffenseTick = this.tick;
+    // a declared war hits harder: the attack arrives with extra troops the treasury pays for
+    if (target && p.warsDeclared.has(target.smallID)) troops = Math.floor(troops * this.config.warTroopBonus());
     const a = new Attack(newId(), p, target, troops, sourceTile);
     const c = sourceTile !== null ? { x: this.x(sourceTile), y: this.y(sourceTile) } : (this.centroid(p) || { x: 0, y: 0 });
     a.originX = c.x; a.originY = c.y;
@@ -931,6 +963,7 @@ class Game {
   }
   acceptAlliance(a, b) {
     a.allies.add(b.id); b.allies.add(a.id);
+    a.warsDeclared.delete(b.smallID); b.warsDeclared.delete(a.smallID);
     a.updateRelation(b, 30); b.updateRelation(a, 30);
     for (const atk of this.attacks) {
       if (!atk.done && ((atk.attacker === a && atk.target === b) || (atk.attacker === b && atk.target === a))) atk.retreated = true;
@@ -945,6 +978,27 @@ class Game {
     this.events.push({ k: 'betrayed', by: breaker.smallID, p: other.smallID });
     return true;
   }
+  // ---- declared wars ----
+  // Declaring war on a nation costs the declarer 20% of their gold income for as long as any war they
+  // declared stands, and in return every attack they send at that nation carries 15% more troops.
+  declareWar(p, target) {
+    if (!p.alive || !target || !target.alive || target === p) return { ok: false, reason: 'Nobody to declare war on' };
+    if (p.isFriendly(target)) return { ok: false, reason: `You are allied with ${target.name} - break the alliance first` };
+    if (p.warsDeclared.has(target.smallID)) return { ok: false, reason: `You are already at war with ${target.name}` };
+    p.warsDeclared.set(target.smallID, this.tick);
+    target.updateRelation(p, -60);
+    this.allianceRequests.delete(`${p.id}|${target.id}`); this.allianceRequests.delete(`${target.id}|${p.id}`);
+    this.events.push({ k: 'warDeclared', by: p.smallID, on: target.smallID });
+    return { ok: true };
+  }
+  makePeace(p, target) {
+    if (!target || !p.warsDeclared.has(target.smallID)) return { ok: false, reason: 'You are not at war with them' };
+    const since = this.tick - p.warsDeclared.get(target.smallID);
+    if (since < this.config.warMinTicks()) return { ok: false, reason: `A war lasts at least ${this.config.warMinTicks() / 10}s (${Math.ceil((this.config.warMinTicks() - since) / 10)}s left)` };
+    p.warsDeclared.delete(target.smallID);
+    this.events.push({ k: 'peace', by: p.smallID, with: target.smallID });
+    return { ok: true };
+  }
   expireAllianceRequests() {
     for (const [k, r] of this.allianceRequests) if (this.tick - r.tick > this.config.allianceRequestTimeoutTicks()) this.allianceRequests.delete(k);
   }
@@ -958,6 +1012,16 @@ class Game {
   }
 
   // ---- power stats (nation info card) ------------------------------------------------
+  // The pieces of ATK POWER, for the hover breakdown: [troops at home, mechs, navy, silos, posts, research x, total]
+  powerPacket(p) {
+    let mechs = 0; for (const m of p.mechs) mechs += (m.engaged ? 250000 : 700000) * (m.hp / m.maxHp);
+    const navy = p.warships.filter((w) => !w.done).length * 120000 + p.subs.filter((sb) => !sb.done).length * 200000;
+    const silos = p.completedUnitsOf(UnitType.SILO).length * 250000;
+    const posts = p.completedUnitsOf(UnitType.DEFENSE_POST).length * 40000;
+    let mult = 1;
+    for (const id of p.researches) if (RESEARCH_BY_ID[id] && RESEARCH_BY_ID[id].tags.some((t) => t === 'mech' || t === 'aggro' || t === 'defense' || t === 'nuke')) mult *= 1.06;
+    return [Math.floor(p.troops), Math.floor(mechs), navy, silos, posts, Math.round(mult * 100) / 100, Math.floor(this.troopsDeployed(p))];
+  }
   attackPower(p) {
     let v = p.troops;
     for (const m of p.mechs) v += (m.engaged ? 250000 : 700000) * (m.hp / m.maxHp);
@@ -967,7 +1031,12 @@ class Game {
     for (const id of p.researches) if (RESEARCH_BY_ID[id] && RESEARCH_BY_ID[id].tags.some((t) => t === 'mech' || t === 'aggro' || t === 'defense' || t === 'nuke')) v *= 1.06;
     return Math.floor(v);
   }
+  // ECONOMY on the nation card is simply what the nation earns per second, from every source.
   economyPower(p) {
+    const inc = this.incomePacket(p);
+    return inc[0] + inc[1] + inc[2] + inc[4] + inc[5] + inc[6] + inc[7];
+  }
+  economyPowerOld(p) {
     let v = p.goldRate * TICKS_PER_SECOND;
     v += p.unitLevels(UnitType.PORT) * 800 * R.tradeGoldMultiplier(p);
     v += p.unitLevels(UnitType.FACTORY) * 600 * R.trainGoldMultiplier(p);
@@ -1002,6 +1071,7 @@ class Game {
       Math.floor(this.troopsDeployed(p)),
       p.airships.filter((a) => !a.done).length, p.airshipsBuilt || 0, cfg.maxResearchesPerPlayer(p),
       this.incomePacket(p),
+      [...p.warsDeclared.keys()], this.powerPacket(p),
     ]);
   }
   // Where this nation's money comes from, per second: the passive parts exactly, the lumpy ones
@@ -1009,8 +1079,11 @@ class Game {
   incomePacket(p) {
     const cfg = this.config;
     const g = cfg.passiveGold(p);
-    const mult = R.goldMultiplier(p, p.isAttacking()) * (p.type !== PlayerType.BOT && cfg.isAtPeace(p, this.tick) ? cfg.peaceDividendMultiplier() : 1);
-    const r = p.incomeRate;
+    const mult = R.goldMultiplier(p, p.isAttacking()) * (p.type !== PlayerType.BOT && cfg.isAtPeace(p, this.tick) ? cfg.peaceDividendMultiplier() : 1)
+      * (p.warsDeclared.size ? cfg.warGoldPenalty() : 1);
+    // the moving average starts at zero, so scale it up while it is still warming up (early game)
+    const warm = 1 / (1 - Math.pow(1 - INCOME_SMOOTHING, Math.max(1, p.incomeSamples || 1)));
+    const r = {}; for (const k in p.incomeRate) r[k] = p.incomeRate[k] * warm;
     return [
       Math.round(g.base * mult * TICKS_PER_SECOND), Math.round(g.land * mult * TICKS_PER_SECOND), Math.round(g.cities * mult * TICKS_PER_SECOND),
       p.type !== PlayerType.BOT && cfg.isAtPeace(p, this.tick) ? 1 : 0,
@@ -1035,7 +1108,29 @@ class Game {
   }
   // Things only this player should know, sent only to them.
   privatePacket(p) {
-    return { choices: p.pendingChoices ? p.pendingChoices.choices : null };
+    return { choices: p.pendingChoices ? p.pendingChoices.choices : null, prices: this.pricesFor(p), caps: this.capsFor(p) };
+  }
+  // Exactly what things cost this player right now, with their doctrines and counts applied. The client
+  // shows these instead of re-deriving formulas it could get wrong.
+  pricesFor(p) {
+    const cfg = this.config, out = {};
+    for (const t of ['city', 'defense', 'silo', 'sam', 'mine', 'artillery', 'repair', 'airport']) out[t] = Math.round(cfg.unitCost(t, this.costIndex(p, t), p));
+    for (const t of ['port', 'factory']) out[t] = Math.round(cfg.unitCost(t, this.costIndex(p, t), p));
+    out.lab = Math.round(cfg.unitCost(UnitType.LAB, this.costIndex(p, UnitType.LAB), p));
+    out.mech = Math.round(cfg.unitCost(UnitType.MECH, p.mechs.length, p));
+    out.warship = Math.round(cfg.unitCost(UnitType.WARSHIP, p.warships.filter((w) => !w.done).length, p));
+    out.submarine = Math.round(cfg.unitCost(UnitType.SUBMARINE, p.subs.filter((sb) => !sb.done).length, p));
+    out.airship = Math.round(cfg.airshipCost(p, p.airshipsBuilt || 0));
+    out.atom = Math.round(cfg.nukeCost('atom', p)); out.hydrogen = Math.round(cfg.nukeCost('hydrogen', p)); out.cluster = Math.round(cfg.nukeCost('cluster', p));
+    out.bomber = Math.round(cfg.bomberCost(p));
+    // upgrades: price of the next level for each upgradable type
+    out.upgrade = {};
+    for (const t of ['city', 'port', 'factory']) out.upgrade[t] = Math.round(cfg.unitCost(t, p.unitLevels(t), p));
+    return out;
+  }
+  capsFor(p) {
+    const cfg = this.config;
+    return { mech: cfg.mechCap(p), warship: cfg.warshipCap(p), submarine: cfg.submarineCap(p), airship: cfg.airshipCap(p) };
   }
   attacksPacket() {
     return this.attacks.filter((a) => !a.done).map((a) => [
@@ -1099,6 +1194,6 @@ class Game {
 }
 
 // ---- mix in the other systems ----
-Object.assign(Game.prototype, require('./units'), require('./navy'), require('./rails'), require('./mechs'), require('./nukes'), require('./air'), require('./refit'), require('./inspect'));
+Object.assign(Game.prototype, require('./units'), require('./navy'), require('./rails'), require('./mechs'), require('./nukes'), require('./air'), require('./refit'), require('./inspect'), require('./intel'));
 
 module.exports = { Game, Player, PlayerType, UnitType, NukeType, newId };

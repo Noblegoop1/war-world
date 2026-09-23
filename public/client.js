@@ -159,7 +159,7 @@ const UNIT_INFO = {
   lab: { label: 'Research Lab', key: '7', desc: 'Needs 3 Cities, must be within rail range of a Factory and away from Cities. Offers 3 random doctrines; pick one (60s). Max 2 per game.', cost: () => 1000000 },
   wall: { label: 'Wall', key: '8', desc: 'Click-and-drag a line on your land: a 3-tile-thick wall, built block by block (slowest build). Snaps to the coast. Enemies must grind it down and can\'t pass behind it. Price climbs steeply. Nukes raze it.', cost: () => 0 },
   mech: { label: 'Mech', key: '9', desc: 'From a level-2 Factory. Click where it should patrol: it walks there, circles, shells hostile structures/mechs/land in range and stomps the ground — hit land turns NEUTRAL (troops must claim it). Slow, land-locked, super tanky; bleeds HP inside enemy land. Click it, then a tile, to move it.', cost: (n) => 2000000 + n * 2500000 },
-  warship: { label: 'Warship', key: '0', desc: 'Needs a Port. Click water to set its patrol area (100 tiles): it hunts enemy boats, trade ships and warships with shells. 1000 HP, repairs near your ports. Click it, then water, to move it.', cost: (n) => Math.min(1e6, (n + 1) * 250000) },
+  warship: { label: 'Warship', key: '0', desc: 'Needs a Port. Click water to set its patrol area (100 tiles): it hunts enemy boats, trade ships and warships with shells. Built at its Port\u2019s level (+35% health, +25% damage per level). You may field 3, plus 1 for every level-3 Port (2 for a level-4). Click it, then water, to move it.', cost: (n) => Math.min(1e6, (n + 1) * 250000) },
   submarine: { label: 'Submarine', key: '', desc: 'Invisible unless within 10 tiles of an enemy warship. Every 90s fires 3 missiles that each wreck one structure in 80 tiles and ignore SAMs.', cost: (n) => Math.min(2.5e6, (n + 1) * 625000), needs: 'submarine_warfare' },
   mine: { label: 'Naval Mine', key: '', desc: 'Place on the sea within 60 tiles of your port. Destroys any enemy ship or boat passing within 2 tiles.', cost: () => 50000, needs: 'naval_mines' },
   artillery: { label: 'Artillery Battery', key: '', desc: 'A static gun with 45-tile reach. It shells enemy Mechs first — this is the answer to a Mech parked on your border — and otherwise drops shells on the nearest attack coming at you. It never takes ground.', cost: (n) => Math.min(2500000, (n + 1) * 400000) },
@@ -522,6 +522,8 @@ function applyStats(stats) {
     p.troops = s[1]; p.gold = s[2]; p.tiles = s[3]; p.flags = s[4]; p.maxTroops = s[5]; p.allies = s[6] || []; p.income = s[7] || 0;
     const r = s[8] || [[], null, null];
     p.income2 = s[19] || null;   // [base, land, cities, peace, trade, train, conquest, plunder] per second
+    p.wars = s[20] || [];        // nations this one has declared war on
+    p.power = s[21] || null;     // [troops home, mechs, navy, silos, posts, research x, troops out]
     p.researches = r[0] || []; p.researching = r[1];
     p.atk = s[9] || 0; p.eco = s[10] || 0; p.walls = s[11] || 0; p.mechCount = s[12] || 0; p.warshipCount = s[13] || 0; p.subCount = s[14] || 0;
     p.deployed = s[15] || 0; p.airships = s[16] || 0; p.airshipsBuilt = s[17] || 0; p.maxResearch = s[18] || 2;
@@ -540,6 +542,8 @@ function applyPrivate(me) {
   const p = G.players.get(G.me);
   if (!p) return;
   p.choices = me.choices || null;
+  if (me.prices) G.myPrices = me.prices;
+  if (me.caps) G.myCaps = me.caps;
   if (p.choices && p.choices.length && !researchPickerOpen && !researchDismissed) openResearchPicker(p.choices);
 }
 function applyTick(m) {
@@ -586,6 +590,8 @@ function handleEvent(e) {
     case 'nuke': logEvent(`☢ ${esc(pname(e.by))} launched a${e.type === 'hydrogen' ? ' hydrogen' : 'n atom'} bomb${e.target ? ' at ' + esc(pname(e.target)) : ''}`, mine(e.target) ? 'bad' : ''); break;
     case 'boom': G.effects.push({ x: e.x, y: e.y, r: e.type === 'hydrogen' ? 100 : e.type === 'warhead' ? 18 : 30, t0: performance.now(), dur: 1800 }); break;
     case 'mirvSplit': logEvent('A MIRV split into warheads!', 'bad'); break;
+    case 'warDeclared': logEvent(`⚔ <b>${esc(pname(e.by))}</b> declared war on <b>${esc(pname(e.on))}</b>`, mine(e.on) ? 'bad' : mine(e.by) ? 'good' : ''); break;
+    case 'peace': logEvent(`🕊 ${esc(pname(e.by))} made peace with ${esc(pname(e.with))}`, mine(e.with) || mine(e.by) ? 'good' : ''); break;
     case 'decoy': logEvent(`${esc(pname(e.by))}'s SAM was fooled by a decoy`, mine(e.by) ? 'bad' : ''); G.effects.push({ x: e.x, y: e.y, r: 5, t0: performance.now(), dur: 600, ring: true }); break;
     case 'refitStart': if (mine(e.p)) logEvent(`A ${e.kind} is heading home to refit to level ${e.level}`); break;
     case 'refitDone': if (mine(e.p)) logEvent(`${e.kind === 'mech' ? 'Mech' : e.kind === 'warship' ? 'Warship' : 'Submarine'} refitted to <b>level ${e.level}</b>`, 'good'); break;
@@ -740,6 +746,30 @@ function renderResearchPanel() {
   el.onmousemove = (e) => def && showTip(`<div class="tip-h">${esc(def.name)}</div><div>${fxMarkup(def.short)}</div>`, e.clientX, e.clientY);
   el.onmouseleave = hideTip;
 }
+// What ATK POWER is made of, for any nation.
+function atkTipHtml(q) {
+  const pw = q && q.power;
+  if (!pw) return '<div class="tip-h">ATK POWER</div><div>How hard this nation can hit right now.</div>';
+  const [home, mechs, navy, silos, posts, mult, out] = pw;
+  const rows = [['Troops at home', home], ['Mechs', mechs], ['Navy', navy], ['Missile silos', silos], ['Defense posts', posts]].filter(([, v]) => v > 0);
+  return `<div class="tip-h">⚔ ATK POWER ${fmt(q.atk || 0)}</div><div class="tip-sub">How hard ${esc(q.name)} can hit right now. Troops out fighting don't count until they come home, so this drops mid-war.</div>`
+    + `<table>${rows.map(([k, v]) => `<tr><td>${k}</td><td>${fmt(v)}</td></tr>`).join('')}`
+    + (mult > 1 ? `<tr><td>Military doctrines</td><td><b class="fx-g">×${mult.toFixed(2)}</b></td></tr>` : '')
+    + (out > 0 ? `<tr><td>Troops away fighting</td><td class="muted">${fmt(out)}</td></tr>` : '') + '</table>'
+    + '<div class="tip-sub" style="margin-top:4px">A healthy mech counts ~700K (less while it fights); each warship 120K, sub 200K, silo 250K, post 40K.</div>';
+}
+function ecoTipHtml(q) {
+  const inc = q && q.income2;
+  if (!inc) return '<div class="tip-h">ECONOMY</div><div>Gold earned per second.</div>';
+  const rows = [['Base', inc[0]], ['Land', inc[1]], ['Cities', inc[2]], ['Trade ships', inc[4]], ['Trains', inc[5]], ['Conquest', inc[6]], ['Plunder', inc[7]]].filter(([, v]) => v > 0);
+  const total = rows.reduce((a, [, v]) => a + v, 0);
+  const notes = [];
+  if (inc[3]) notes.push('<b class="fx-g">Peace dividend ×1.3</b> (no attacks on nations for 90s)');
+  if ((q.wars || []).length) notes.push('<b class="fx-r">War economy ×0.8</b> (declared war)');
+  return `<div class="tip-h">💰 ECONOMY +${fmt(total)}/s</div><div class="tip-sub">Everything ${esc(q.name)} earns per second, averaged over the last half minute.</div>`
+    + (notes.length ? `<div class="tip-sub">${notes.join(' · ')}</div>` : '')
+    + `<table>${rows.map(([k, v]) => `<tr><td>${k}</td><td>+${fmt(v)}/s</td></tr>`).join('')}</table>`;
+}
 // Where your gold comes from, on hover over the gold box.
 function goldTipHtml(p) {
   const inc = p.income2;
@@ -770,6 +800,9 @@ function havePort() { return G.units.some((u) => u[1] === 'port' && u[2] === G.m
 function itemCost(key) {
   const p = me();
   if (G.settings && G.settings.infiniteGold) return 0;
+  // The server sends what things cost *you* right now (doctrines, counts and levels applied). Use it;
+  // the formulas below are only a fallback for the first frame before it arrives.
+  if (G.myPrices && key !== 'wall' && G.myPrices[key] !== undefined) return G.myPrices[key];
   if (key === 'airship') return UNIT_INFO.airship.cost(p ? p.airshipsBuilt || 0 : 0);
   if (key === 'airport') return 8000000;
   const disc = myHas('mass_production') ? 0.85 : 1;
@@ -873,8 +906,18 @@ function playerCardHtml(sm) {
   for (const u of G.units) if (u[2] === sm) counts[u[1]] = (counts[u[1]] || 0) + 1;
   const rel = p && p.sm !== sm ? (p.allies.includes(sm) ? ' · <span style="color:#b9f6ca">Ally</span>' : '') : (p && p.sm === sm ? ' · You' : '');
   let html = `<div class="pc-head">${flagBadge(q)}<span>${esc(q.name)}</span><span class="muted" style="font-weight:400;font-size:12px">${q.type === 'nation' ? 'Nation' : q.type === 'bot' ? 'Tribe' : 'Player'}${rel}${q.traitor ? ' · <span style="color:#ff9e93">Traitor</span>' : ''}${q.alive ? '' : ' · Eliminated'}</span>${G.leaderSm === sm ? ' 👑' : ''}</div>`;
-  html += `<div class="pc-power"><div class="pw atk" title="Attack power: troops at home + mechs + navy + silos + defenses + military research. Drops while their forces are away fighting."><span class="pw-l">⚔ ATK POWER</span><span class="pw-v">${fmt(q.atk || 0)}</span></div><div class="pw eco" title="Economy: gold per second from land, trade ports, factories/trains and research."><span class="pw-l">💰 ECONOMY</span><span class="pw-v">${fmt(q.eco || 0)}/s</span></div></div>`;
-  html += `<div class="pc-stats"><span>💰 <b>${fmt(q.gold)}</b></span><span>⚔ <b>${fmt(q.troops)}</b> / ${fmt(q.maxTroops)}</span><span>🗺 <b>${(100 * q.tiles / G.numLand).toFixed(1)}%</b> (${fmt(q.tiles)})</span><span>📈 +${fmt(q.income)}/s</span></div>`;
+  html += `<div class="pc-power"><div class="pw atk" data-tip="atk"><span class="pw-l">⚔ ATK POWER</span><span class="pw-v">${fmt(q.atk || 0)}</span></div><div class="pw eco" data-tip="eco"><span class="pw-l">💰 ECONOMY</span><span class="pw-v">${fmt(q.eco || 0)}/s</span></div></div>`;
+  // declared wars, both ways
+  const theyOnMe = p && (q.wars || []).includes(p.sm), meOnThem = p && (p.wars || []).includes(sm);
+  if (meOnThem || theyOnMe || (q.wars || []).length) {
+    const parts = [];
+    if (meOnThem) parts.push('<b class="fx-r">You are at war with them</b>');
+    if (theyOnMe) parts.push('<b class="fx-r">They declared war on you</b>');
+    const others = (q.wars || []).filter((x) => !p || x !== p.sm).map((x) => esc(pname(x)));
+    if (others.length) parts.push(`at war with ${others.join(', ')}`);
+    html += `<div class="pc-war">⚔ ${parts.join(' · ')}</div>`;
+  }
+  html += `<div class="pc-stats"><span>💰 <b>${fmt(q.gold)}</b></span><span>⚔ <b>${fmt(q.troops)}</b> / ${fmt(q.maxTroops)}</span><span>🗺 <b>${(100 * q.tiles / G.numLand).toFixed(1)}%</b> (${fmt(q.tiles)})</span><span title="Troops gained per second">📈 +${fmt(q.income)} troops/s</span></div>`;
   let uhtml = ['city', 'port', 'factory', 'defense', 'artillery', 'repair', 'silo', 'sam', 'lab', 'mine'].filter((k) => counts[k]).map((k) => `<span title="${UNIT_INFO[k].label}"><img src="${iconURL[ICON_FOR[k] || k] || ''}" alt="">${counts[k]}</span>`).join('');
   if (q.mechCount) uhtml += `<span title="Mechs"><img src="${iconURL.target || ''}" alt="">${q.mechCount} mech</span>`;
   if (q.warshipCount) uhtml += `<span title="Warships"><img src="${iconURL.warship || ''}" alt="">${q.warshipCount}</span>`;
@@ -887,7 +930,10 @@ function playerCardHtml(sm) {
   if (p && p.alive && q.alive && p.sm !== sm) {
     html += `<div class="pc-actions">`;
     if (p.allies.includes(sm)) html += `<button data-act="donateT">Donate 10% troops</button><button data-act="donateG">Donate 10% gold</button><button data-act="break" class="danger">Break alliance</button>`;
-    else html += `<button data-act="ally">🤝 Request alliance</button>`;
+    else {
+      html += `<button data-act="ally">🤝 Request alliance</button>`;
+      html += (p.wars || []).includes(sm) ? `<button data-act="peace">🕊 Make peace</button>` : `<button data-act="war" class="danger">⚔ Declare war</button>`;
+    }
     html += `<button data-act="focus">Find</button></div>`;
   }
   return html;
@@ -899,6 +945,11 @@ function renderPlayerCard(sm, pinned) {
   card.style.position = 'relative';
   card.classList.remove('hidden');
   card.querySelectorAll('button[data-act]').forEach((b) => { b.onclick = () => playerAction(sm, b.dataset.act); });
+  const q = G.players.get(sm);
+  card.querySelectorAll('.pw[data-tip]').forEach((el) => {
+    el.onmousemove = (e) => showTip(el.dataset.tip === 'atk' ? atkTipHtml(q) : ecoTipHtml(q), e.clientX, e.clientY);
+    el.onmouseleave = hideTip;
+  });
   card.querySelectorAll('.rs[data-rid]').forEach((el) => {
     const def = RESEARCH_DEFS.find((r) => r.id === el.dataset.rid);
     if (!def) return;
@@ -910,6 +961,10 @@ function playerAction(sm, act) {
   const p = me();
   switch (act) {
     case 'ally': send({ t: 'ally', p: sm }); toast('Alliance request sent', true); break;
+    case 'war':
+      if (confirm(`Declare war on ${pname(sm)}?\n\nYour attacks on them carry 15% more troops, but your gold income drops by 20% while the war lasts (at least 60 seconds).`)) send({ t: 'declareWar', p: sm });
+      break;
+    case 'peace': send({ t: 'makePeace', p: sm }); break;
     case 'break': if (confirm(`Break the alliance with ${pname(sm)}? You will be marked as a traitor for 30s.`)) send({ t: 'breakAlly', p: sm }); break;
     case 'donateT': send({ t: 'donate', p: sm, troops: Math.floor(p.troops * 0.1) }); break;
     case 'donateG': send({ t: 'donate', p: sm, gold: Math.floor(p.gold * 0.1) }); break;
@@ -965,11 +1020,20 @@ function openResearchPicker(choices) {
     const mins = [0, 3, 4, 5][r.tier || 2];
     return `<div class="rcard tag-${tag}" data-id="${esc(id)}"><div class="rcard-tag">${esc(r.tags.join(' · ').toUpperCase())}</div><div class="rcard-name">${esc(r.name)}</div><div class="rcard-short">${fxMarkup(r.short)}</div><div class="rcard-desc">${esc(r.desc)}</div><div class="rcard-time">~${mins} min at a level-1 lab</div><button class="primary">Research</button></div>`;
   }).join('');
-  el.innerHTML = `<div class="rp-inner"><div class="rp-head"><h2>Choose a Doctrine</h2><span class="muted">Doctrines take 3–5 minutes (less in an upgraded lab). Each lab you own gives two.</span></div><div class="rp-cards">${cards}</div><div class="muted small-text">Press Esc to decide later — the lab keeps the offer open (right-click your land → Research!).</div></div>`;
-  el.querySelectorAll('.rcard').forEach((c) => { c.onclick = () => { send({ t: 'research', id: c.dataset.id }); closeResearchPicker(); toast(`Researching ${researchName(c.dataset.id)}…`, true); }; });
+  el.innerHTML = `<div class="rp-inner"><div class="rp-head"><h2>Choose a Doctrine</h2><span class="muted">Doctrines take 3–5 minutes (less in an upgraded lab). Each lab you own gives two.</span></div><div class="rp-cards">${cards}</div><div class="muted small-text">Press Esc to decide later — the lab keeps the offer open (right-click your land → Research!).</div></div>`
+    + `<button id="rp-toggle" class="rp-toggle">Hide doctrines</button>`;
+  el.querySelectorAll('.rcard').forEach((c) => { c.onclick = () => { if (el.classList.contains('rp-collapsed')) return; send({ t: 'research', id: c.dataset.id }); closeResearchPicker(); toast(`Researching ${researchName(c.dataset.id)}…`, true); }; });
+  // Hide the cards to look around the map before choosing; the map is fully usable while they are hidden.
+  $('rp-toggle').onclick = (e) => {
+    e.stopPropagation();
+    const hide = !el.classList.contains('rp-collapsed');
+    el.classList.toggle('rp-collapsed', hide);
+    $('rp-toggle').textContent = hide ? 'Show doctrines' : 'Hide doctrines';
+  };
+  el.classList.remove('rp-collapsed');
   el.classList.remove('hidden');
 }
-function closeResearchPicker() { if (researchPickerOpen) researchDismissed = true; researchPickerOpen = false; $('research-picker').classList.add('hidden'); }
+function closeResearchPicker() { if (researchPickerOpen) researchDismissed = true; researchPickerOpen = false; $('research-picker').classList.add('hidden'); $('research-picker').classList.remove('rp-collapsed'); }
 
 // =============================================================================
 // Radial menu (right-click)
@@ -1139,7 +1203,13 @@ function openRadial(tile, sx, sy) {
         items.push({ icon: 'donateTroop', label: 'Donate troops', onClick: () => { playerAction(o, 'donateT'); closeRadial(); } });
         items.push({ icon: 'donateGold', label: 'Donate gold', onClick: () => { playerAction(o, 'donateG'); closeRadial(); } });
         items.push({ icon: 'traitor', label: 'Break alliance', onClick: () => { playerAction(o, 'break'); closeRadial(); } });
-      } else items.push({ icon: 'ally', label: 'Alliance', onClick: () => { playerAction(o, 'ally'); closeRadial(); } });
+      } else {
+        items.push({ icon: 'ally', label: 'Alliance', onClick: () => { playerAction(o, 'ally'); closeRadial(); } });
+        if (q.type !== 'bot') {
+          if ((p.wars || []).includes(o)) items.push({ icon: 'ally', label: 'Make peace', onClick: () => { playerAction(o, 'peace'); closeRadial(); } });
+          else items.push({ icon: 'sword', label: 'Declare war', cls: 'attack', title: 'Your attacks on them carry +15% troops; your gold income is 20% lower while the war lasts', onClick: () => { closeRadial(); playerAction(o, 'war'); } });
+        }
+      }
     }
     if (p.alive && itemAvailable('atom') && haveReadySilo()) {
       items.push({ icon: 'atom', label: 'Atom bomb', cost: itemCost('atom'), disabled: p.gold < itemCost('atom'), onClick: () => { send({ t: 'nuke', type: 'atom', tile }); closeRadial(); } });

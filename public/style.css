@@ -231,3 +231,14 @@ a { color: #8ab4f8; }
 #inspect-panel td:first-child { color: var(--muted); padding-right: 10px; white-space: nowrap; }
 #inspect-panel td.good { color: #6ee7a0; }
 #inspect-panel td.bad { color: #ff8a80; }
+
+/* ---- declared wars on the nation card ---- */
+.pc-war { margin-top: 6px; font-size: 12px; color: #ffb4ab; }
+.pw[data-tip] { cursor: help; }
+
+/* ---- research picker: hide the cards to look at the map ---- */
+.rp-toggle { position: fixed; left: 50%; transform: translateX(-50%); bottom: 18%; z-index: 61; pointer-events: auto;
+  padding: 8px 18px; border-radius: 999px; font-weight: 700; background: #1b2230; border: 1px solid #3b4b66; color: #dfe8f5; cursor: pointer; }
+.rp-toggle:hover { border-color: #9ad0ff; }
+#research-picker.rp-collapsed { background: transparent; pointer-events: none; }
+#research-picker.rp-collapsed .rp-inner { display: none; }

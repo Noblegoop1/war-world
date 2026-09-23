@@ -14,6 +14,29 @@ const COLONISE_COOLDOWN = 200;             // ticks between attempts
 // umbrellas and lands most of what it fires, and gold is plentiful, so the pacing has to come from here
 // rather than from missiles being wasted.
 const NUKE_CADENCE = [Infinity, 1200, 750, 500];
+// Route-search budget for the AI's own boat launches (see Game.sendBoat).
+const AI_BOAT_BUDGET = { maxIter: 60000, tries: 3 };
+// ---- word memory (see rememberNations) ----
+// Chance, per turn, that the nation takes a fresh look at the others (easy -> impossible), and who it
+// looks at: easy only its neighbours, impossible every nation on the map, every turn.
+const OBSERVE_CHANCE = [0.25, 0.5, 0.75, 1];
+const WORD_FADE = 0.7;          // a word not seen again keeps this share of its confidence per look
+const WORD_FORGET = 0.15;       // below this it is forgotten
+const BELIEVE = 0.5;            // confidence at which a word counts as true
+const EARLY_GAME_TICKS = 3000;  // the first five minutes: alliances are cheap and useful
+// Words that make each choice attractive. A choice's appeal for a nation is the sum of its words'
+// confidence in that nation's entry of our memory.
+const CHOICE_WORDS = {
+  nukeClump: { need: ['city_clump', 'industry_clump', 'populated', 'econ_buff', 'research_hub'], why: ['danger', 'attacked_me', 'nuked_me', 'betrayed_me', 'at_war', 'declared_war_on_me', 'strong_army', 'giant', 'growing'], open: ['clump_uncovered', 'no_air_defense'] },
+  retaliate: { why: ['attacked_me', 'attacking_me_now', 'betrayed_me', 'nuked_me', 'declared_war_on_me', 'sank_my_ships'], can: ['weak_army', 'troops_depleted', 'busy', 'overextended', 'shrinking', 'collapsing'], cant: ['strong_army', 'fortified', 'walled', 'mech_army', 'giant'] },
+  seekAlly: { want: ['neighbor', 'strong_army', 'trade_partner', 'enemy_of_enemy', 'danger', 'rich'], refuse: ['traitor', 'betrayed_me', 'attacked_me', 'attacking_me_now', 'at_war', 'declared_war_on_me', 'nuked_me'] },
+  declareWar: { want: ['easy_prey', 'betrayed_me', 'ally_winning', 'collapsing', 'weak_army', 'troops_depleted'], avoid: ['strong_army', 'giant', 'fortified', 'deterrent', 'nuke_armed'] },
+  buildArtillery: ['mech_army', 'mech_force', 'heavy_mechs', 'mech_breakers', 'mech_firepower', 'amphibious'],
+  buildSam: ['nuclear', 'nuke_armed', 'cheap_nukes', 'mirv', 'bombers', 'bomber_threat', 'sub_nukes'],
+  buildPosts: ['aggressive', 'fast_attacks', 'invader', 'strong_army', 'attacking_me_now', 'danger'],
+  airlift: ['sam_covered', 'sam_clump', 'walled', 'fortified', 'coastal_fort', 'overseas', 'shot_my_missiles'],
+  mechTarget: { want: ['easy_prey', 'weak_army', 'shrinking', 'busy', 'at_war'], avoid: ['artillery_line', 'anti_mech', 'mech_army', 'fortified'] },
+};
 const COLONISE_MIN_TROOP_RATIO = 0.35;     // don't ship out unless reasonably stocked
 const COLONISE_ISOLATION_BONUS = 1.5;      // how much an untouched island beats contested ground
 const COLONISE_SCORE_THRESHOLD = [400, 160, 60, 25];   // easy -> impossible
@@ -61,6 +84,13 @@ class NationAI {
     this.threat = { sams: 0, silos: 0, mechs: 0, air: 0, navy: 0, artillery: 0, bombers: 0 };
     this.posture = 'expand';
     this.labCheckAfter = 0;
+    // ---- word memory ----
+    this.mem = new Map();          // smallID -> { conf: Map<word, 0..1>, seen: tick, clump: {x,y}|null }
+    this.betrayedBy = new Set();
+    this.nukedBy = new Set();
+    this.sankBy = new Set();
+    this.warCheckAfter = 0;
+    this.assistAfter = 0;
   }
 
   get difficulty() { return this.cfg.difficulty(); }
@@ -143,6 +173,7 @@ class NationAI {
     }
     this.threat = T;
     this.posture = this.choosePosture(neighbours);
+    this.rememberNations(neighbours);
   }
   // What kind of turn is this? Drives what we build and how much we keep in reserve.
   choosePosture(neighbours) {
@@ -162,7 +193,10 @@ class NationAI {
     for (const e of events) {
       if (e.k === 'samhit' && e.vs === me) this.samWall.set(e.by, (this.samWall.get(e.by) || 0) + 1);
       else if (e.k === 'airshipDown' && e.p === me) this.airWall.set(e.by, (this.airWall.get(e.by) || 0) + 1);
-      else if (e.k === 'sunk' && e.p === me && e.by) this.grudge.set(e.by, Math.min(100, (this.grudge.get(e.by) || 0) + 4));
+      else if (e.k === 'sunk' && e.p === me && e.by) { this.grudge.set(e.by, Math.min(100, (this.grudge.get(e.by) || 0) + 4)); this.sankBy.add(e.by); }
+      else if (e.k === 'betrayed' && e.p === me) { this.betrayedBy.add(e.by); this.grudge.set(e.by, 100); }
+      else if (e.k === 'nuke' && e.target === me) { this.nukedBy.add(e.by); this.grudge.set(e.by, Math.min(100, (this.grudge.get(e.by) || 0) + 40)); }
+      else if (e.k === 'warDeclared' && e.on === me) this.grudge.set(e.by, Math.min(100, (this.grudge.get(e.by) || 0) + 25));
     }
   }
   // Enemy SAMs that would get a shot at a missile landing on this tile.
@@ -177,6 +211,219 @@ class NationAI {
     }
     return n;
   }
+  // ======================================================================================
+  // Word memory. Each look at another nation writes words about it with a confidence: the shared,
+  // objective profile (what they have built and researched - see intel.js) plus how they relate to us.
+  // Choices read these words; see CHOICE_WORDS at the top of the file.
+  // ======================================================================================
+  rememberNations(neighbours) {
+    const g = this.game, p = this.p;
+    if (this.rng.next() >= OBSERVE_CHANCE[this.diffIndex]) return;
+    // every landmass we hold ground on (sampled from our border)
+    const myMasses = new Set();
+    { let i = 0; for (const t of p.border) { if (i++ % 7) continue; myMasses.add(g.landmass[t]); if (i > 700) break; } }
+    const sharesLand = (o) => { let i = 0; for (const t of o.border) { if (i++ % 7) continue; if (myMasses.has(g.landmass[t])) return true; if (i > 700) break; } return false; };
+    const hated = [...this.grudge.entries()].filter(([, v]) => v > 40).map(([k]) => k);
+    const allies = g.players.filter((o) => o !== p && o.alive && p.isFriendly(o));
+    for (const o of g.players) {
+      if (o === p || !o.alive) continue;
+      const nb = neighbours.has(o);
+      // who we bother looking at depends on how good we are
+      const d = this.diffIndex;
+      const attacking = p.incomingAttacks.some((a) => !a.done && a.attacker === o);
+      const relevant = d >= 3 || nb || attacking || p.isFriendly(o)
+        || (d >= 1 && (this.grudge.get(o.smallID) || 0) > 20)
+        || (d >= 2 && o.type !== PlayerType.BOT && sharesLand(o));
+      if (!relevant) continue;
+      if (o.type === PlayerType.BOT && !nb) continue;   // tribes only matter next door
+      const prof = g.nationProfile(o);
+      const w = new Set(prof.words);
+      // ---- how they relate to us ----
+      const sameMass = nb || sharesLand(o);   // a shared border is by definition the same continent
+      if (nb) w.add('neighbor');
+      if (sameMass) w.add('same_continent'); else w.add('overseas');
+      if (p.isFriendly(o)) w.add('ally');
+      if ((this.grudge.get(o.smallID) || 0) > 20) w.add('attacked_me');
+      if (attacking) w.add('attacking_me_now');
+      if (this.betrayedBy.has(o.smallID)) w.add('betrayed_me');
+      if (this.nukedBy.has(o.smallID) || p.lastNukedBy === o) w.add('nuked_me');
+      if (this.sankBy.has(o.smallID)) w.add('sank_my_ships');
+      if ((this.samWall.get(o.smallID) || 0) > 0) w.add('shot_my_missiles');
+      if ((this.airWall.get(o.smallID) || 0) > 0) w.add('downed_my_airships');
+      if (o.warsDeclared && o.warsDeclared.has(p.smallID)) w.add('declared_war_on_me');
+      if (p.warsDeclared.has(o.smallID)) w.add('at_war');
+      if (g.tradeShips.some((sh) => !sh.done && ((sh.owner === o && sh.dstPort.owner === p) || (sh.owner === p && sh.dstPort.owner === o)))) w.add('trade_partner');
+      if (allies.some((a) => o.outgoingAttacks.some((x) => !x.done && x.target === a))) w.add('enemy_of_ally');
+      if (allies.some((a) => a.outgoingAttacks.some((x) => !x.done && x.target === o))) {
+        w.add('ally_target');
+        if (prof.words.has('shrinking') || prof.words.has('collapsing')) w.add('ally_winning');
+      }
+      if (hated.some((h) => o.outgoingAttacks.some((x) => !x.done && x.target && x.target.smallID === h))) w.add('enemy_of_enemy');
+      if (o.troops > p.troops * 1.3) w.add('strong_army');
+      if (o.troops < p.troops * 0.6) w.add('weak_army');
+      if (o.numTiles > p.numTiles * 2) w.add('giant');
+      if (o.numTiles < p.numTiles * 0.5) w.add('small');
+      const hostile = g.hostile(p, o);
+      if (hostile && (nb || sameMass) && (w.has('strong_army') || w.has('aggressive') || attacking || (w.has('nuke_armed') && (this.grudge.get(o.smallID) || 0) > 0))) w.add('danger');
+      if (hostile && nb && w.has('weak_army') && !w.has('fortified') && !w.has('walled')) w.add('easy_prey');
+      // ---- fold into memory: seen words go to 1, the rest fade ----
+      let m = this.mem.get(o.smallID);
+      if (!m) { m = { conf: new Map(), seen: 0, clump: null }; this.mem.set(o.smallID, m); }
+      for (const [k, v] of m.conf) { if (!w.has(k)) { const nv = v * WORD_FADE; if (nv < WORD_FORGET) m.conf.delete(k); else m.conf.set(k, nv); } }
+      for (const k of w) m.conf.set(k, 1);
+      m.seen = g.tick;
+      m.clump = prof.clumps[0] || null;
+    }
+    // forget the dead
+    for (const k of [...this.mem.keys()]) { const o = g.playersBySmall[k]; if (!o || !o.alive) this.mem.delete(k); }
+  }
+  // Confidence we have in `word` about nation `sm` (0 if never seen).
+  know(sm, word) { const m = this.mem.get(sm); return m ? (m.conf.get(word) || 0) : 0; }
+  believes(sm, word) { return this.know(sm, word) >= BELIEVE; }
+  wordSum(sm, words) { let t = 0; for (const w of words) t += this.know(sm, w); return t; }
+  // Every nation we remember, with its memory entry (live ones only).
+  remembered() {
+    const out = [];
+    for (const [sm, m] of this.mem) { const o = this.game.playersBySmall[sm]; if (o && o.alive) out.push([o, m]); }
+    return out;
+  }
+  // For tests / debugging: the words we hold about a nation, strongest first.
+  memoryOf(sm) { const m = this.mem.get(sm); return m ? [...m.conf.entries()].sort((a, b) => b[1] - a[1]) : []; }
+
+  // ---- choices driven by the words ----
+  // "They are clumped, their clump has no SAM over it, and they are a danger to us": nuke the clump.
+  strikeClump() {
+    const g = this.game, p = this.p;
+    if (g.settings.disableNukes || this.difficulty === Difficulty.EASY || g.tick < (this.nukeAfter || 0)) return false;
+    if (!p.completedUnitsOf(UnitType.SILO).some((u) => u.cooldown === 0)) return false;
+    const cw = CHOICE_WORDS.nukeClump;
+    const cluster = p.researches.has('cluster_munitions');
+    const decoys = p.researches.has('decoy_warheads') || p.researches.has('hypersonic_missiles');
+    const cands = [];
+    for (const [o, m] of this.remembered()) {
+      if (!g.hostile(p, o) || !m.clump || o.type === PlayerType.BOT) continue;
+      const need = this.wordSum(o.smallID, cw.need);
+      const why = this.wordSum(o.smallID, cw.why);
+      // Impossible AIs will hit anyone worth hitting; the rest only strike nations that are a problem.
+      if (need < 1 || (why < 1 && this.diffIndex < 3)) continue;
+      // aim at the clump's own city nearest its centre: the centre itself can be water or a neighbour
+      let tile = -1, bd = Infinity;
+      for (const u of o.units) {
+        if (u.type !== UnitType.CITY) continue;
+        const d = (g.x(u.tile) - m.clump.x) ** 2 + (g.y(u.tile) - m.clump.y) ** 2;
+        if (d < bd) { bd = d; tile = u.tile; }
+      }
+      if (tile < 0 || bd > 30 * 30) continue;
+      const cover = this.samCoverPath(tile);
+      // how much of the strike we expect to land, given the weapons we have
+      const lands = cover === 0 ? 1 : cluster ? Math.max(0, 1 - cover / this.cfg.clusterCount()) : decoys && cover <= 1 ? 0.55 : 0;
+      if (lands <= 0.3) continue;
+      const open = this.wordSum(o.smallID, cw.open);
+      cands.push({ o, tile, cover, score: (need + why * 1.5 + open) * (m.clump.levels + m.clump.industry * 2) * lands });
+    }
+    cands.sort((a, b) => b.score - a.score);
+    for (const c of cands.slice(0, 4)) {
+      const type = c.cover > 0 && cluster ? NukeType.CLUSTER : NukeType.ATOM;
+      if (p.gold < this.cfg.nukeCost(type, p) * 1.1) return false;
+      // never onto our own or an ally's land: if this one would splash a friend, try the next
+      const { outer } = this.cfg.nukeMagnitude(type, p);
+      const bx = g.x(c.tile), by = g.y(c.tile);
+      let friendly = false;
+      for (let y = Math.max(0, by - outer); y <= Math.min(g.height - 1, by + outer) && !friendly; y += 3) for (let x = Math.max(0, bx - outer); x <= Math.min(g.width - 1, bx + outer); x += 3) {
+        const sm = g.owner[g.ref(x, y)];
+        if (sm && (sm === p.smallID || p.isFriendly(g.playersBySmall[sm]))) { friendly = true; break; }
+      }
+      if (friendly) continue;
+      if (g.launchNuke(p, type, c.tile).ok) { this.nukeAfter = g.tick + NUKE_CADENCE[this.diffIndex] / this.nukeBias; return true; }
+    }
+    return false;
+  }
+  // Hit back - but only when it is a fight we can win, not out of spite.
+  smartRetaliate() {
+    const g = this.game, p = this.p;
+    const cw = CHOICE_WORDS.retaliate;
+    let best = null, bestScore = 0;
+    for (const [o] of this.remembered()) {
+      if (!g.hostile(p, o) || !g.canAttack(p, o)) continue;
+      const why = this.wordSum(o.smallID, cw.why);
+      if (why < 1) continue;
+      const can = this.wordSum(o.smallID, cw.can), cant = this.wordSum(o.smallID, cw.cant);
+      // their army against what we can actually spare, adjusted by what we know about them
+      const spare = p.troops - this.cfg.maxTroops(p) * this.reserveRatio;
+      const odds = spare / Math.max(1, o.troops) * (1 + 0.25 * can) / (1 + 0.2 * cant);
+      const threshold = this.betrayedBy.has(o.smallID) ? 0.5 : 0.7;   // betrayal is worth more risk
+      if (odds < threshold) continue;
+      // don't open a second front while someone stronger is already on us
+      const other = p.incomingAttacks.filter((a) => !a.done && a.attacker !== o).reduce((sum, a) => sum + a.troops, 0);
+      if (other > p.troops * 0.4) continue;
+      const score = why * odds;
+      if (score > bestScore) { bestScore = score; best = o; }
+    }
+    return best ? this.sendAttack(best) : false;
+  }
+  // Allies fighting someone next to us: lend a hand, and if they are winning, join the land grab.
+  assistAllies() {
+    const g = this.game, p = this.p;
+    if (g.tick < this.assistAfter) return false;
+    this.assistAfter = g.tick + 120;
+    for (const [o] of this.remembered()) {
+      if (!this.believes(o.smallID, 'ally_target') || !g.hostile(p, o) || !g.canAttack(p, o)) continue;
+      if (!this.believes(o.smallID, 'neighbor') && !this.believes(o.smallID, 'same_continent')) continue;
+      const winning = this.believes(o.smallID, 'ally_winning') || this.believes(o.smallID, 'collapsing');
+      const share = winning ? 0.4 : 0.1;
+      const troops = Math.floor(p.troops * share);
+      if (troops < 1000 || p.troops < this.cfg.maxTroops(p) * (winning ? 0.35 : 0.5)) continue;
+      if (winning && !p.warsDeclared.has(o.smallID) && this.difficulty !== Difficulty.EASY) g.declareWar(p, o);   // rush: take the +15%
+      this.currentEnemy = o;
+      return g.sendAttack(p, o, troops, null, this.chooseFocus(o)) !== null;
+    }
+    return false;
+  }
+  // Declare war when we are committing to a real offensive; make peace when it stops paying.
+  manageWars() {
+    const g = this.game, p = this.p;
+    if (this.difficulty === Difficulty.EASY || g.tick < this.warCheckAfter) return;
+    this.warCheckAfter = g.tick + 300;
+    const cw = CHOICE_WORDS.declareWar;
+    // end wars that no longer make sense: target dead, now stronger than us, or we are being overrun
+    for (const [sm] of [...p.warsDeclared]) {
+      const o = g.playersBySmall[sm];
+      if (!o || !o.alive || this.posture === 'turtle' || (o.troops > p.troops * 1.2 && !this.betrayedBy.has(sm))) g.makePeace(p, o);
+    }
+    if (p.warsDeclared.size || this.posture !== 'war') return;
+    let best = null, bestScore = 1.5;
+    for (const [o] of this.remembered()) {
+      if (!g.hostile(p, o) || o.type === PlayerType.BOT || !this.believes(o.smallID, 'neighbor')) continue;
+      const score = this.wordSum(o.smallID, cw.want) - this.wordSum(o.smallID, cw.avoid) * 0.8;
+      if (score > bestScore) { bestScore = score; best = o; }
+    }
+    if (best) { g.declareWar(p, best); this.currentEnemy = best; }
+  }
+  // Buildings the words call for, on top of the usual build order.
+  wordDrivenBuilds(reserve) {
+    const g = this.game, p = this.p;
+    const threat = (words) => {
+      let t = 0;
+      for (const [o] of this.remembered()) if (g.hostile(p, o) && (this.believes(o.smallID, 'neighbor') || this.believes(o.smallID, 'same_continent'))) t += this.wordSum(o.smallID, words);
+      return t;
+    };
+    // mechs next door: artillery
+    if (p.unitsOf(UnitType.ARTILLERY).length < 3 && threat(CHOICE_WORDS.buildArtillery) >= 1.5) {
+      const cost = this.cfg.unitCost(UnitType.ARTILLERY, p.unitsOf(UnitType.ARTILLERY).length, p);
+      if (p.gold >= cost + reserve) { const t = this.tileNearThreat() ?? this.randomInnerTile(); if (t !== null && g.build(p, UnitType.ARTILLERY, t).ok) return true; }
+    }
+    // nukes or bombers in reach: a SAM over our biggest clump of cities
+    if (!g.settings.disableNukes && p.unitsOf(UnitType.SAM).length < 3 && threat(CHOICE_WORDS.buildSam) >= 1.5) {
+      const cost = this.cfg.unitCost(UnitType.SAM, p.unitsOf(UnitType.SAM).length, p);
+      const mine = g.nationProfile(p).clumps[0];
+      if (mine && p.gold >= cost + reserve) {
+        const t = this.deepTileNear(mine.x, mine.y, 12, (tt) => !!g.samAirportConflict(p, UnitType.SAM, tt));
+        if (t !== null && g.build(p, UnitType.SAM, t).ok) return true;
+      }
+    }
+    return false;
+  }
+
   // Enemy SAMs that get a shot at a missile on its way from our nearest silo to this tile. The missile
   // flies a curved arc and any SAM along that arc can take it, not just the ones around the target -
   // so walk the same arc the simulation uses and count every launcher whose umbrella it crosses.
@@ -304,6 +551,8 @@ class NationAI {
     neighbors.sort((a, b) => a.troops - b.troops);
     const friends = neighbors.filter((o) => p.isFriendly(o));
     const enemies = neighbors.filter((o) => !p.isFriendly(o));
+    this.manageWars();
+    if (this.assistAllies()) return;
     if (touchesNeutral && this.sendAttack(null)) return;
     // Nothing left to walk into: look for an empty landmass worth shipping troops to.
     if (this.maybeColonise()) return;
@@ -325,7 +574,13 @@ class NationAI {
   }
   getStrategies(friends, enemies) {
     const p = this.p, g = this.game;
-    const retaliate = () => { const inc = p.incomingAttacks.find((a) => a.attacker.alive && !p.isFriendly(a.attacker)); return inc ? this.sendAttack(inc.attacker) : false; };
+    // Hit back only when the words say we can win it (see smartRetaliate); fall back to the plain version
+    // for nations we have no memory of yet.
+    const retaliate = () => {
+      if (this.smartRetaliate()) return true;
+      const inc = p.incomingAttacks.find((a) => a.attacker.alive && !p.isFriendly(a.attacker) && !this.mem.has(a.attacker.smallID));
+      return inc ? this.sendAttack(inc.attacker) : false;
+    };
     const bots = () => { const bot = enemies.find((e) => e.type === PlayerType.BOT); return bot ? this.sendAttack(bot) : false; };
     const assist = () => { for (const f of friends) for (const a of f.incomingAttacks) if (enemies.includes(a.attacker)) return this.sendAttack(a.attacker); return false; };
     const betray = () => {
@@ -457,7 +712,7 @@ class NationAI {
     let troops = this.calculateAttackTroops(null, true);
     if (troops === null) return false;
     troops = Math.min(troops, Math.max(4000, best.size * 120));   // enough to take the island, no more
-    const sent = g.sendBoat(p, bestShore, troops) !== null;
+    const sent = g.sendBoat(p, bestShore, troops, AI_BOAT_BUDGET) !== null;
     // back off either way: a failed route usually means no sea path, and retrying every tick is waste
     this.coloniseAfter = g.tick + (sent ? COLONISE_COOLDOWN : COLONISE_COOLDOWN * 3);
     return sent;
@@ -483,7 +738,7 @@ class NationAI {
     if (g.pathBudget-- <= 0) return false;
     const troops = this.calculateAttackTroops(g.ownerOf(dstTile), true);
     if (troops === null) return false;
-    return g.sendBoat(p, dstTile, troops) !== null;
+    return g.sendBoat(p, dstTile, troops, AI_BOAT_BUDGET) !== null;
   }
 
   // ---- alliances --------------------------------------------------------------
@@ -492,11 +747,24 @@ class NationAI {
     for (const [, r] of [...g.allianceRequests]) {
       if (r.to !== p) continue;
       const from = r.from;
-      const accept = p.relation(from) > -20 && (from.troops > p.troops * 0.5 || this.rng.chance(2)) && !this.rng.chance(4);
+      const sm = from.smallID, cw = CHOICE_WORDS.seekAlly;
+      let accept;
+      if (this.wordSum(sm, cw.refuse) >= 1) accept = false;          // traitors, attackers, betrayers
+      else if (g.tick < EARLY_GAME_TICKS) accept = p.relation(from) > -20 && !this.rng.chance(5);   // early: take the trade bonus
+      else accept = p.relation(from) > -20 && (from.troops > p.troops * 0.5 || this.wordSum(sm, cw.want) >= 1.5 || this.rng.chance(2)) && !this.rng.chance(4);
       g.replyAlliance(p, from, accept);
     }
   }
   maybeSendAllianceRequests(enemies) {
+    const g = this.game, p0 = this.p;
+    // Early on, friendly neighbours are worth courting: allied trade pays both sides 15% more.
+    if (g.tick < EARLY_GAME_TICKS && this.rng.chance(3)) {
+      const cw = CHOICE_WORDS.seekAlly;
+      const cands = this.remembered().map(([o]) => o).filter((o) => o.type !== PlayerType.BOT && g.hostile(p0, o)
+        && this.wordSum(o.smallID, cw.refuse) < 1 && this.wordSum(o.smallID, cw.want) >= 1);
+      cands.sort((a, b) => this.wordSum(b.smallID, cw.want) - this.wordSum(a.smallID, cw.want));
+      if (cands.length) { g.requestAlliance(p0, cands[0]); return; }
+    }
     if (!this.rng.chance(15)) return;
     const p = this.p;
     const strong = enemies.filter((e) => e.type !== PlayerType.BOT && e.troops > p.troops && p.relation(e) >= 0 && e.incomingAttacks.every((a) => a.attacker !== p));
@@ -652,6 +920,7 @@ class NationAI {
         if (t !== null && g.build(p, UnitType.ARTILLERY, t).ok) return true;
       }
     }
+    if (!easy && this.wordDrivenBuilds(reserve)) return true;
     // Airport: a late, enormous purchase, and the answer to a SAM wall. If the rivals we care about sit
     // behind SAMs (or their SAMs have already shot our missiles down), stop spending on small things and
     // save for one; then it goes deep inside our land, and maybeAirlift aims the drops at their launchers.
@@ -733,6 +1002,18 @@ class NationAI {
         case 'heavy_industry': s += p.unitsOf(UnitType.FACTORY).length >= 2 ? 5 : -3; break;
         case 'nuclear_subs': s += p.researches.has('submarine_warfare') ? 4 : -30; break;
         default: break;
+      }
+      // What our memory says we are up against: every remembered nation votes for the doctrines that
+      // answer its words, weighted by how much that nation matters to us.
+      if (r.answers) {
+        let votes = 0;
+        for (const [o] of this.remembered()) {
+          if (p.isFriendly(o)) continue;
+          const sm = o.smallID;
+          const weight = this.believes(sm, 'danger') ? 2 : this.believes(sm, 'neighbor') ? 1.4 : this.believes(sm, 'same_continent') ? 1 : 0.5;
+          votes += weight * this.wordSum(sm, r.answers);
+        }
+        s += Math.min(14, votes * 1.2);
       }
       const noise = this.difficulty === Difficulty.MEDIUM ? 6 : 2;
       return s + this.rng.int(0, noise);
@@ -846,7 +1127,7 @@ class NationAI {
     if (!ports.length) return;
     const reserve = p.unitsOf(UnitType.SILO).length ? this.cfg.nukeCost(NukeType.ATOM, p) : 0;
     const enemyShipsNear = g.warships.some((w) => !w.done && g.hostile(p, w.owner) && ports.some((u) => g.distXY(g.x(u.tile), g.y(u.tile), w.x, w.y) < 150));
-    const wantW = Math.min(R.warshipCap(p), (this.hardOrWorse ? 1 : 0) + this.wantWarships + (enemyShipsNear ? 2 : 0) + (p.boats.length ? 1 : 0));
+    const wantW = Math.min(this.cfg.warshipCap(p), (this.hardOrWorse ? 1 : 0) + this.wantWarships + (enemyShipsNear ? 2 : 0) + (p.boats.length ? 1 : 0));
     const live = p.warships.filter((w) => !w.done).length;
     if (live < wantW && p.gold >= this.cfg.unitCost(UnitType.WARSHIP, p.warships.length, p) + reserve) {
       const pt = this.navalPatrolPoint(ports);
@@ -896,7 +1177,7 @@ class NationAI {
     if (this.difficulty === Difficulty.EASY) return;
     const facs = g.mechFactories(p);
     const live = p.mechs.filter((m) => !m.done);
-    const cap = R.mechCap(p);
+    const cap = this.cfg.mechCap(p);
     const amphibious = R.mechAmphibious(p);
     const tanky = p.researches.has('heavy_mech') || p.researches.has('assault_mech');
     const want = Math.min(cap, (this.difficulty === Difficulty.MEDIUM ? 1 : this.difficulty === Difficulty.HARD ? 2 : 3) + this.wantMechs);
@@ -906,6 +1187,18 @@ class NationAI {
     if (!enemy) {
       const nb = g.neighborsOf(p).players.filter((o) => g.hostile(p, o) && o.type !== PlayerType.BOT).sort((a, b) => b.troops - a.troops);
       enemy = nb[0] || null;
+    }
+    // Prefer a neighbour our memory marks as prey, and keep mechs away from artillery nests.
+    {
+      const cw = CHOICE_WORDS.mechTarget;
+      let bestPrey = null, bestScore = 1;
+      for (const [o] of this.remembered()) {
+        if (!g.hostile(p, o) || !this.believes(o.smallID, 'neighbor')) continue;
+        const score = this.wordSum(o.smallID, cw.want) - this.wordSum(o.smallID, cw.avoid);
+        if (score > bestScore) { bestScore = score; bestPrey = o; }
+      }
+      if (bestPrey) enemy = bestPrey;
+      else if (enemy && this.wordSum(enemy.smallID, cw.avoid) >= 2) enemy = null;   // walking into guns
     }
     const inc = p.incomingAttacks.filter((a) => !a.done);
     const incoming = inc.reduce((sum, a) => sum + a.troops, 0);
@@ -1050,8 +1343,8 @@ class NationAI {
     // Airships exist to crack SAM umbrellas: nations sitting behind SAMs come first, and the drop goes
     // right onto the launchers (with SEAD that wipes them; without, the troops still overrun the tile).
     const sams = (o) => o.units.filter((u) => u.type === UnitType.SAM && u.constructionLeft === 0).length;
-    victims.sort((a, b) => (sams(b) * 3 + (b === this.currentEnemy ? 5 : 0) + (this.grudge.get(b.smallID) || 0) / 20)
-      - (sams(a) * 3 + (a === this.currentEnemy ? 5 : 0) + (this.grudge.get(a.smallID) || 0) / 20));
+    const appeal = (o) => sams(o) * 3 + (o === this.currentEnemy ? 5 : 0) + (this.grudge.get(o.smallID) || 0) / 20 + this.wordSum(o.smallID, CHOICE_WORDS.airlift) * 2;
+    victims.sort((a, b) => appeal(b) - appeal(a));
     for (const v of victims.slice(0, 3)) {
       const launchers = v.units.filter((u) => u.type === UnitType.SAM && u.constructionLeft === 0);
       for (const sam of launchers) {
@@ -1077,6 +1370,7 @@ class NationAI {
   maybeNuke() {
     const g = this.game, p = this.p;
     if (g.settings.disableNukes || this.difficulty === Difficulty.EASY) return;
+    if (this.strikeClump()) return;
     if (this.difficulty === Difficulty.MEDIUM && !this.rng.chance(Math.max(1, Math.round(3 / this.nukeBias)))) return;
     if (g.tick < (this.nukeAfter || 0)) return;
     const c = g.canLaunchNuke(p, NukeType.ATOM, p.spawnTile ?? 0);

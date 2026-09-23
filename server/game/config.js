@@ -84,7 +84,11 @@ const CITY_GOLD_BY_LEVEL = [0, 1, 2.2, 3.6, 6.5];        // multiples of the uni
 const PEACE_DIVIDEND = 1.3;                              // passive gold multiplier while at peace
 const PEACE_DIVIDEND_TICKS = 900;                        // 90s since you last attacked a nation
 const CONQUEST_TREASURY_SHARE = 0.5;
-const ALLIED_TRADE_BONUS = 1.5;
+const ALLIED_TRADE_BONUS = 1.15;                       // trade ships between allies pay both sides 15% more
+// Declaring war: a standing war economy costs gold, and the declared target is hit harder.
+const WAR_GOLD_PENALTY = 0.8;
+const WAR_TROOP_BONUS = 1.15;
+const WAR_MIN_TICKS = 600;                              // a war lasts at least a minute before peace can be made
 const TERRA_NULLIUS_MIN_COST = 5;
 const TERRA_NULLIUS_MAX_COST = 100;
 const ATTACKER_LOSS_BASE = 0.463;
@@ -174,7 +178,7 @@ class Config {
     const base = rel === 'ally' ? 35000 : rel === 'self' ? 10000 : 25000;
     return Math.max(5000, base - Math.max(0, stopsVisited - 9) * 5000);
   }
-  bomberCost() { return 300000; }
+  bomberCost(player = null) { return player && player.type === PlayerType.HUMAN && this.infiniteGold() ? 0 : 300000; }
   bomberRange() { return 250; }
   bomberSpeed() { return 4; }
   traitorDurationTicks() { return 30 * TICKS_PER_SECOND; }
@@ -211,20 +215,23 @@ class Config {
     if (player && player.type === PlayerType.HUMAN && this.infiniteGold()) return 0;
     const d = this.buildDiscount(player);
     switch (type) {
-      case UnitType.CITY: return Math.min(1000000, Math.pow(2, numOwned) * 125000) * d;
+      // The first few are as cheap as ever; the ladder now tops out at 2M instead of 1M, because income
+      // no longer sits at a flat 1K/s and a 1M cap stopped meaning anything by mid-game.
+      case UnitType.CITY: return Math.min(2000000, Math.pow(2, numOwned) * 125000) * d;
       case UnitType.PORT:
-      case UnitType.FACTORY: return Math.min(1000000, Math.pow(2, numOwned) * 125000) * d;
-      case UnitType.DEFENSE_POST: return Math.min(250000, (numOwned + 1) * 50000) * d;
-      case UnitType.SILO: return 1000000 * d;
+      case UnitType.FACTORY: return Math.min(2000000, Math.pow(2, numOwned) * 125000) * d;
+      // Posts were 250K at most - about 17 seconds of mid-game income for x5 attacker losses.
+      case UnitType.DEFENSE_POST: return Math.min(600000, (numOwned + 1) * 75000) * d;
+      case UnitType.SILO: return 1500000 * d;
       case UnitType.SAM: return Math.min(3000000, (numOwned + 1) * 1500000) * d;
       case UnitType.LAB: return 1000000 * this.labCostMultiplier(numOwned) * d;
-      case UnitType.MINE: return 50000 * d;
+      case UnitType.MINE: return 100000 * d;
       case UnitType.WARSHIP: {
-        let c = Math.min(1000000, (numOwned + 1) * 250000);
+        let c = Math.min(1500000, (numOwned + 1) * 300000);
         if (player && player.researches && player.researches.has('coastal_bombardment')) c += 300000 * Math.floor(numOwned / 10);
         return c * d;
       }
-      case UnitType.SUBMARINE: return Math.min(2500000, (numOwned + 1) * 625000) * d;
+      case UnitType.SUBMARINE: return Math.min(3000000, (numOwned + 1) * 750000) * d;
       // Mechs are national-scale assets: brutally expensive, escalating hard per mech owned.
       case UnitType.MECH: return (2000000 + numOwned * 2500000) * R.mechCostMultiplier(player) * d;
       case UnitType.ARTILLERY: return Math.min(2500000, (numOwned + 1) * 400000) * d;
@@ -299,6 +306,16 @@ class Config {
   maxAirports() { return 1; }
   airportSamExclusion() { return 70; }
   airshipCap(player) { return 3 + R.airshipCapBonus(player); }
+  // Every Port / Factory at the top level adds one to how many of its units you may field, and a
+  // level-4 one (Heavy Industry) adds another. Levelling production is how you grow a navy or mech corps.
+  producerCapBonus(player, type) {
+    let b = 0;
+    for (const u of player.units) if (u.type === type && u.constructionLeft === 0) { if (u.level >= 3) b++; if (u.level >= 4) b++; }
+    return b;
+  }
+  warshipCap(player) { return R.warshipCap(player) + this.producerCapBonus(player, UnitType.PORT); }
+  submarineCap(player) { return 2 + this.producerCapBonus(player, UnitType.PORT); }
+  mechCap(player) { return R.mechCap(player) + this.producerCapBonus(player, UnitType.FACTORY); }
   airshipCost(player, built) {
     if (player && player.type === PlayerType.HUMAN && this.infiniteGold()) return 0;
     return (1000000 + built * 750000) * R.airshipCostMultiplier(player) * this.buildDiscount(player);
@@ -317,7 +334,7 @@ class Config {
   nukeCost(type, player) {
     if (player && player.type === PlayerType.HUMAN && this.infiniteGold()) return 0;
     if (type === NukeType.CLUSTER) return 1500000;
-    return type === NukeType.HYDROGEN ? 5000000 : R.atomCost(player);
+    return type === NukeType.HYDROGEN ? 6000000 : R.atomCost(player);
   }
 
   startTroops(type) {
@@ -375,6 +392,7 @@ class Config {
     const g = this.passiveGold(player);
     let rate = (g.base + g.land + g.cities) * R.goldMultiplier(player, attacking);
     if (player.type !== PlayerType.BOT && this.isAtPeace(player, tick)) rate *= PEACE_DIVIDEND;
+    if (player.warsDeclared && player.warsDeclared.size) rate *= WAR_GOLD_PENALTY;
     return rate;
   }
   // Gold each side earns when a trade ship arrives, by sailing distance.
@@ -388,6 +406,9 @@ class Config {
   labSpeedMultiplier(level = 1) { return [1, 1, 0.8, 0.65][Math.min(level, 3)]; }
   labUpgradeCost(level) { return 1500000 * level; }
   peaceDividendMultiplier() { return PEACE_DIVIDEND; }
+  warGoldPenalty() { return WAR_GOLD_PENALTY; }
+  warTroopBonus() { return WAR_TROOP_BONUS; }
+  warMinTicks() { return WAR_MIN_TICKS; }
   tradeShipGold(dist) {
     const debuff = 300;
     return Math.floor(75000 / (1 + Math.exp(-0.03 * (dist - debuff))) + 50 * dist);

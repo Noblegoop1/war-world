@@ -27,7 +27,7 @@ module.exports = {
     if (!this.isLand(targetTile) && !(amph && this.isWater(targetTile))) return { ok: false, reason: amph ? 'Pick a land or water tile' : 'Mechs are land-locked: pick a land tile' };
     const facs = this.mechFactories(p);
     if (!facs.length) return { ok: false, reason: 'Mechs need a level-2 Factory (build a Factory, then build on it again to upgrade)' };
-    if (p.mechs.filter((m) => !m.done).length >= R.mechCap(p)) return { ok: false, reason: `Mech limit reached (${R.mechCap(p)})` };
+    if (p.mechs.filter((m) => !m.done).length >= this.config.mechCap(p)) return { ok: false, reason: `Mech limit reached (${this.config.mechCap(p)})` };
     const cost = this.config.unitCost(UnitType.MECH, p.mechs.length, p);
     if (p.gold < cost) return { ok: false, reason: `Not enough gold (need ${Math.floor(cost).toLocaleString()})` };
     let factory = fromTile >= 0 ? facs.find((f) => f.tile === fromTile) : null;

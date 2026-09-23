@@ -177,7 +177,7 @@ module.exports = {
     if (!silos.length) return { ok: false, reason: 'Bombers launch from a Missile Silo' };
     silos.sort((a, b) => this.dist(a.tile, tile) - this.dist(b.tile, tile));
     if (this.dist(silos[0].tile, tile) > this.config.bomberRange()) return { ok: false, reason: `Out of range (${this.config.bomberRange()} tiles from a silo)` };
-    const cost = this.config.bomberCost();
+    const cost = this.config.bomberCost(p);
     if (p.gold < cost) return { ok: false, reason: `Not enough gold (need ${cost.toLocaleString()})` };
     return { ok: true, cost, silo: silos[0], target: u };
   },
