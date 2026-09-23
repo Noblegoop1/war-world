@@ -116,13 +116,20 @@ module.exports = {
         hitTiles.set(sm, (hitTiles.get(sm) || 0) + 1);
         this.relinquish(t);
       }
-      if (!this.fallout[t]) { this.fallout[t] = 1; this.numFallout++; this.changedTiles.push(t); }
+      this.addFallout(t, this.config.falloutDuration(nk.type));
       if (u) this.removeUnit(u);
     }
     for (const [sm, count] of hitTiles) {
       const q = this.playersBySmall[sm];
-      const frac = count / Math.max(1, before.get(sm));
-      q.removeTroops(q.troops * Math.min(1, frac * 2));
+      const owned = Math.max(1, before.get(sm));
+      // Population dies with the ground. Per-tile death factor (OpenFront's shape), capped so a single
+      // bomb can cripple but not instantly delete an army, and applied to troops in transit too.
+      const perTile = this.config.nukeDeathFactor(q.troops, owned);
+      const killed = Math.min(q.troops * this.config.nukeMaxTroopLoss(), perTile * count);
+      q.removeTroops(killed);
+      const share = q.troops > 0 ? Math.min(0.9, killed / (q.troops + killed)) : 0.5;
+      for (const a of q.outgoingAttacks) if (!a.done) a.troops *= 1 - share;
+      for (const b of q.boats) if (!b.done) b.troops *= 1 - share;
       q.updateRelation(nk.owner, -100);
       q.lastNukedBy = nk.owner;
       if (q !== nk.owner && q.allies.has(nk.owner.id) && count >= 100) this.breakAlliance(nk.owner, q);

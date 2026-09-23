@@ -40,6 +40,8 @@ class NationAI {
     this.lastWallTick = -10000;
     this.currentEnemy = null;
     this.coloniseAfter = this.rng.int(0, COLONISE_COOLDOWN);
+    this.airliftAfter = 0;
+    this.wantAirships = 0;
   }
 
   get difficulty() { return this.cfg.difficulty(); }
@@ -72,6 +74,7 @@ class NationAI {
     this.handleNavy();
     this.handleMechs();
     this.maybeAttack();
+    this.maybeAirlift();
     this.maybeNuke();
     this.maybeBomb();
   }
@@ -79,7 +82,7 @@ class NationAI {
   // Called when a research completes: adopt the doctrine.
   onResearch() {
     const p = this.p;
-    this.aggression = 1; this.buildBias = 1; this.wantFactories = 1; this.wantMechs = 0; this.wantWarships = 0; this.wantSubs = 0; this.wantMines = 0; this.wantBombers = 0; this.nukeBias = 1;
+    this.aggression = 1; this.buildBias = 1; this.wantFactories = 1; this.wantMechs = 0; this.wantWarships = 0; this.wantSubs = 0; this.wantMines = 0; this.wantBombers = 0; this.wantAirships = 0; this.nukeBias = 1;
     for (const id of p.researches) {
       const r = RESEARCH_BY_ID[id];
       if (!r || !r.ai) continue;
@@ -91,6 +94,7 @@ class NationAI {
       if (r.ai.subs) this.wantSubs += r.ai.subs;
       if (r.ai.mines) this.wantMines += r.ai.mines;
       if (r.ai.bombers) this.wantBombers += r.ai.bombers;
+      if (r.ai.airships) this.wantAirships += r.ai.airships;
       if (r.ai.nukes) this.nukeBias *= 1 + 0.5 * r.ai.nukes;
     }
     // war economy pays for attacking: keep less in reserve
@@ -115,7 +119,7 @@ class NationAI {
         const x = Math.round(g.x(t) + (dx / l) * k), y = Math.round(g.y(t) + (dy / l) * k);
         if (!g.valid(x, y)) break;
         const tt = g.ref(x, y);
-        if (g.isLand(tt) && g.owner[tt] === 0 && !g.fallout[tt]) score++;
+        if (g.isLand(tt) && g.owner[tt] === 0) score += g.fallout[tt] ? 0.5 : 1;   // nuked ground still counts, just discounted
       }
       if (score > bestScore) { bestScore = score; bestT = t; }
     }
@@ -445,6 +449,16 @@ class NationAI {
         if (t !== null && g.build(p, UnitType.ARTILLERY, t).ok) return true;
       }
     }
+    // Airport: a late, enormous purchase. Only worth it when someone we want dead is behind a wall of
+    // SAMs and warships, which is exactly when nothing else we own can reach them.
+    if (!easy && !p.unitsOf(UnitType.AIRPORT).length && p.gold >= this.cfg.unitCost(UnitType.AIRPORT, 0, p) + reserve) {
+      const turtled = g.players.some((o) => o !== p && o.alive && g.hostile(p, o) && o.numTiles > 300
+        && (o.unitsOf(UnitType.SAM).length >= 2 || o.warships.filter((w) => !w.done).length >= 3));
+      if (turtled || this.wantAirships) {
+        const t = this.randomInnerTile(25);
+        if (t !== null && g.build(p, UnitType.AIRPORT, t).ok) return true;
+      }
+    }
     // Repair Yard: only worth it once we have mechs or walls to keep alive.
     if (p.researches.has('field_engineering')) {
       const yards = p.unitsOf(UnitType.REPAIR).length;
@@ -634,46 +648,76 @@ class NationAI {
   }
 
   // ---- mechs ---------------------------------------------------------------------------
+  // Mechs are the most expensive thing a nation can field, so they get a plan rather than a shove in
+  // the enemy's direction. The doctrines a nation has researched change that plan:
+  //   Amphibious Mech  -> mechs stop caring about coastlines, so overseas nations become raid targets
+  //   Heavy / Assault  -> tanky enough to live inside enemy land, so push instead of hold
+  //   Long-Range       -> outranges defences, so parking on a border is worth more
+  // Without those, a mech is used the way a careful player uses one: hold the line, screen the front,
+  // and only commit when the war is already going our way.
   handleMechs() {
     const g = this.game, p = this.p;
     if (this.difficulty === Difficulty.EASY) return;
     const facs = g.mechFactories(p);
     const live = p.mechs.filter((m) => !m.done);
     const cap = R.mechCap(p);
+    const amphibious = R.mechAmphibious(p);
+    const tanky = p.researches.has('heavy_mech') || p.researches.has('assault_mech');
     const want = Math.min(cap, (this.difficulty === Difficulty.MEDIUM ? 1 : this.difficulty === Difficulty.HARD ? 2 : 3) + this.wantMechs);
-    // choose where mechs should be: the front against the current enemy (or the strongest hostile neighbour)
+
+    // ---- who are we pointing them at ----
     let enemy = this.currentEnemy && this.currentEnemy.alive && g.hostile(p, this.currentEnemy) ? this.currentEnemy : null;
     if (!enemy) {
       const nb = g.neighborsOf(p).players.filter((o) => g.hostile(p, o) && o.type !== PlayerType.BOT).sort((a, b) => b.troops - a.troops);
       enemy = nb[0] || null;
-      const inc = p.incomingAttacks.find((a) => a.attacker.alive && g.hostile(p, a.attacker));
-      if (inc) enemy = inc.attacker;
     }
-    const target = enemy ? this.mechTargetTile(enemy) : -1;
+    const inc = p.incomingAttacks.filter((a) => !a.done);
+    const incoming = inc.reduce((sum, a) => sum + a.troops, 0);
+    const pressed = incoming > p.troops * 0.25;
+    if (pressed && inc.length) enemy = inc.sort((a, b) => b.troops - a.troops)[0].attacker;
+    // Amphibious mechs open up nations we could never walk to. That is the whole point of the doctrine,
+    // and it was being ignored: pick an overseas victim and raid it.
+    let raidTarget = null;
+    if (amphibious && !pressed) {
+      const overseas = g.players.filter((o) => o !== p && o.alive && g.hostile(p, o) && o.numTiles > 40
+        && !g.neighborsOf(p).players.includes(o) && o.troops < p.troops * 1.2);
+      overseas.sort((a, b) => a.troops - b.troops);
+      raidTarget = overseas[0] || null;
+    }
+
+    // ---- build ----
     if (facs.length && live.length < want) {
       const reserve = p.unitsOf(UnitType.SILO).length ? this.cfg.nukeCost(NukeType.ATOM, p) : 0;
       const cost = this.cfg.unitCost(UnitType.MECH, p.mechs.length, p);
       if (p.gold >= cost + reserve * 0.5) {
-        const dst = target >= 0 ? target : this.randomInnerTile();
+        // Build it somewhere safe of ours near the action, not on top of the enemy where it arrives
+        // alone and dies. It walks to the front under its own orders.
+        const dst = this.tileNearThreat() ?? this.randomInnerTile(15) ?? this.randomInnerTile();
         if (dst !== null && dst >= 0) g.buildMech(p, dst);
       }
     }
-    // Standing orders. A mech that is just parked is a wasted 2M, so each one gets a job based on how
-    // the war is going: hold the line when we are being pushed, march into the enemy when we are not,
-    // and walk our own border when there is no war at all. Re-checked every few seconds, not every tick.
-    if (!this.rng.chance(3)) return;
-    const incoming = p.incomingAttacks.filter((a) => !a.done).reduce((sum, a) => sum + a.troops, 0);
-    const pressed = incoming > p.troops * 0.25;
-    for (const m of live) {
-      if (m.engaged) continue;
+    if (!live.length || !this.rng.chance(3)) return;
+
+    // ---- orders ----
+    // Hold back one mech per serious incoming attack, send the rest forward. A single mech parked on a
+    // threatened border is worth more than two wandering around the interior.
+    const needDefenders = pressed ? Math.min(live.length, Math.max(1, Math.ceil(live.length / 2))) : 0;
+    const sorted = [...live].sort((a, b) => b.hp / b.maxHp - a.hp / a.maxHp);
+    sorted.forEach((m, i) => {
+      if (m.engaged) return;
       let mode = 'roam', orderTarget = 0;
-      if (pressed) mode = 'defend';
-      else if (enemy && g.hostile(p, enemy)) {
-        // spare mechs go disrupt the enemy's interior while the rest hold the shared front
+      const healthy = m.hp > m.maxHp * 0.45;
+      if (i < needDefenders) {
+        mode = 'defend';
+      } else if (raidTarget && healthy && i % 2 === 1) {
+        mode = 'assault'; orderTarget = raidTarget.smallID;   // sail over and cause havoc
+      } else if (enemy && g.hostile(p, enemy) && healthy && (tanky || this.hardOrWorse || p.troops > enemy.troops)) {
         mode = 'assault'; orderTarget = enemy.smallID;
+      } else if (!healthy) {
+        mode = 'defend';   // hurt mechs fall back behind our own lines to bleed less
       }
       if (m.mode !== mode || m.orderTarget !== orderTarget) g.setMechMode(p, m.id, mode, orderTarget);
-    }
+    });
   }
   nearOurLand(x, y, r) {
     const g = this.game, p = this.p;
@@ -682,7 +726,8 @@ class NationAI {
     const c = g.centroid(p);
     return c ? Math.hypot(c.x - x, c.y - y) <= r + Math.sqrt(p.numTiles) : false;
   }
-  // Somewhere of ours close to whatever is hurting us: where a battery or repair yard earns its keep.
+  // Somewhere of ours close to whatever is hurting us: where a battery, repair yard or a fresh mech
+  // earns its keep. Deliberately not on the border itself, where it would just be overrun.
   tileNearThreat() {
     const g = this.game, p = this.p;
     let fx = null, fy = null;
@@ -693,7 +738,6 @@ class NationAI {
       if (m) { fx = m.x; fy = m.y; }
     }
     if (fx === null) return null;
-    // an inner tile of ours that is close to it, but not right on the border where it will be overrun
     let best = null, bd = Infinity, i = 0;
     for (const t of p.tiles) {
       if (i++ % 7) continue;
@@ -718,6 +762,32 @@ class NationAI {
       if (d < bd) { bd = d; best = t; }
     }
     return best;
+  }
+
+  // Drop troops behind someone's defences. Aimed at a soft inner tile rather than the border, because
+  // the point of flying is to land where their army is not.
+  maybeAirlift() {
+    const g = this.game, p = this.p;
+    if (!p.alive || g.tick < this.airliftAfter) return false;
+    if (!g.airports(p).length) return false;
+    if (g.liveAirships(p).length >= this.cfg.airshipCap(p)) return false;
+    if (p.troops < this.cfg.maxTroops(p) * 0.4) return false;
+    this.airliftAfter = g.tick + 300;
+    const victims = g.players.filter((o) => o !== p && o.alive && g.hostile(p, o) && o.numTiles > 60);
+    if (!victims.length) return false;
+    // prefer whoever we are already fighting, else the weakest thing in range
+    victims.sort((a, b) => (a === this.currentEnemy ? -1 : b === this.currentEnemy ? 1 : a.troops - b.troops));
+    for (const v of victims.slice(0, 3)) {
+      let i = 0;
+      for (const t of v.tiles) {
+        if (i++ % 23) continue;
+        if (i > 2000) break;
+        if (v.border.has(t)) continue;                       // inland, not the beach
+        if (g.liveAirships(p).length >= this.cfg.airshipCap(p)) return true;
+        if (g.launchAirship(p, t).ok) return true;
+      }
+    }
+    return false;
   }
 
   // ---- nukes / bombers ------------------------------------------------------------------

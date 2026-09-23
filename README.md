@@ -45,9 +45,16 @@ Open <http://localhost:3000>, pick a name, **Create game**, choose a map, **Star
     can see which stretch is fortified). A post within 6 tiles of open water also shells enemy ships,
     but only for ~0.4% of a warship's health per shell — coastal guns harass ships, they don't sink
     them. Coastal Defense Network raises that to 1.5%.
-  * **Artillery Battery** — a static gun with 45-tile reach. It shells enemy **Mechs** first (this is
-    the answer to a Mech parked on your border) and otherwise drops shells on the nearest attack
-    coming at you. It never takes ground.
+  * **Artillery Battery** — a siege gun with 45-tile reach that fires once every 45 seconds and hits
+    like a truck: **25% of a Mech's health** or **10% of a warship's** per shell. It targets enemy
+    Mechs first (this is the answer to a Mech parked on your border), then ships, then whichever
+    attack is closest. It never takes ground.
+  * **Airport** — one per nation and enormously expensive. It flies **Airships**: each carries 5% of
+    your troops (10% with Strategic Airlift) over SAMs, warships and coastal defenses and drops them
+    on any land tile in range. SAMs cannot touch one and warships cannot reach one; only an enemy
+    **Interceptor Screen** brings them down. Max 3 in the air, each costing more than the last. The
+    catch is that your own SAMs cannot sit within 70 tiles of your Airport unless you research
+    **Airbase Network** — opening the sky for your planes opens it for everyone's missiles.
   * **Repair Yard** (needs Field Engineering) — heals your Mechs and rebuilds damaged wall tiles
     within 40 tiles. Put it behind the front, not on it.
   * **Missile Silo** — launches atom / hydrogen bombs (90-tick reload) and, with the research,
@@ -69,7 +76,9 @@ Open <http://localhost:3000>, pick a name, **Create game**, choose a map, **Star
   yours — send troops to claim it. Mechs are very tanky (40K HP at L2, +50% per level) but bleed
   HP while standing in enemy territory, faster where the enemy is strong or has a defense post.
   Nukes, other mechs and time inside enemy land kill them. Click a mech, then a tile, to re-route
-  it. A mech also **anchors the ground around it**: attacks within 30 tiles lose 3x troops and crawl
+  it. Mechs move **20% faster on friendly soil and 30% slower inside enemy land**, and one sitting at
+  home with nothing threatening it holds its fire instead of shelling the countryside.
+  A mech also **anchors the ground around it**: attacks within 30 tiles lose 3x troops and crawl
   at half speed, the same way a defense post works.
   Right-click your own mech for its **standing orders**: *Hold* (circle the patrol point, what a click
   sets), *Roam* (walk your border, favouring the stretch nearest a hostile neighbour), *Auto-defend*
@@ -81,8 +90,11 @@ Open <http://localhost:3000>, pick a name, **Create game**, choose a map, **Star
   radius); they hunt enemy transport boats, trade ships and warships with shells, repair near your
   ports, and with Coastal Bombardment shell coastal land too. Click one, then water, to move it.
 * **Research Lab** (key **7**) — needs **3 Cities**, must be within rail range of a Factory, and
-  away from Cities. When ready it offers **3 random doctrines** (TFT-augment style); pick one, it
-  takes 60s, then the lab cools down. **Max 2 researches per game.** Everyone can see a nation's
+  away from Cities. When ready it offers **3 random doctrines** (TFT-augment style); pick one and it
+  takes **3–5 minutes** depending on how strong it is, then the lab cools down. Each lab is worth
+  **two doctrines**, and every extra lab costs **five times** the last — a third doctrine is a real
+  economic decision. **Lose the lab and the research dies with it**: bomb it, nuke it or take the
+  ground and the work stops, so where you put it matters. Everyone can see a nation's
   researches on its info card. All 30 doctrines are live — most are stat buffs (War Economy, Mass
   Production, Industrial Mobilization, Military Rail, Strategic Logistics, Military-Industrial
   Complex, Defensive Position, Coastal Defense Network, Hardened Infrastructure, Military
@@ -97,6 +109,13 @@ Open <http://localhost:3000>, pick a name, **Create game**, choose a map, **Star
   regions and ship troops to the best one, scoring by size, distance and how isolated it is, so places
   like Greenland and Antarctica get settled instead of sitting empty all game. The harder the AI, the
   further it will sail for a free continent.
+* **Nukes** kill population, not just land: a blast takes a share of the defender's standing army per
+  tile it erases (up to 75%), and troops already at sea or mid-attack die with them. The ground is left
+  **irradiated** — drawn as a sickly green scar — which makes it expensive to cross but still free land.
+  Radiation decays over a couple of minutes, and both the AI and you can move straight back in.
+* **Levels** — every building tops out at **level 3**. A Factory above level 2 also runs better: each
+  level past 2 makes its trains pay 35% more. One doctrine can push a single building type to level 4
+  (**Megacity Planning** for Cities, **Heavy Industry** for Factories) and that last step is a big one.
 * **Conquering** a nation or tribe pays gold: its treasury (all of an AI's, half of a human's) +
   10K + 15 per tile. Tribes start weak, grow a little, and stay weak.
 * **Expansion** uses OpenFront's frontier priority (terrain + already-owned neighbours + a little
@@ -116,6 +135,10 @@ The **troop bar** shows your army, not just what's at home: the solid part is tr
 land, the striped part is what you've committed to attacks, boats and garrisons — still yours, still
 coming back. The rate above it turns **amber** when your cap is what's throttling growth rather than
 your land, so it's a cue to build Cities or take ground.
+
+**Selecting units:** click any mech or ship — the hit area follows the icon, so you don't have to zoom
+in. **Shift-drag** a box to select several at once; with a unit button armed (Mech, Warship, Submarine)
+the box only picks up that kind. Clicking a building picks the building, not the ground under it.
 
 **Keys:** `A` attack under cursor · `B` boat under cursor · `R` retaliate against your latest
 attacker · `C` centre on your territory · `1-6` structures, `7` lab, `8` wall, `9` mech, `0`
@@ -185,7 +208,8 @@ server/game/units.js   Structures, 3-thick walls (planning, coast snapping, bloc
 server/game/rails.js   Factories, rail network (8-connected A*), trains and their gold
 server/game/mechs.js   Mechs: build from factories, patrol, cannon, stomp, territory damage
 server/game/navy.js    Boats, trade ships, shells, warships, submarines, naval mines
-server/game/nukes.js   Nukes on Bezier arcs, blast, SAMs, MIRV, deterrence, bombers
+server/game/nukes.js   Nukes on Bezier arcs, blast, fallout, SAMs, MIRV, deterrence, bombers
+server/game/air.js     Airports and airships: the way past a SAM + navy turtle
 server/game/research.js  The 30 doctrines and every multiplier they apply
 server/game/path.js    8-connected A* (octile), path resampling, Bezier helpers
 server/game/ai.js      Nation AI (research-driven; factories, mechs + standing orders, navy,

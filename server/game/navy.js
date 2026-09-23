@@ -197,6 +197,20 @@ module.exports = {
     }
     this.shells = this.shells.filter((s) => !s.done);
   },
+  // Land tiles within r of a point, as a plain array. Used by anything that scars the ground.
+  tilesAround(cx, cy, r) {
+    const out = [];
+    const x0 = Math.floor(cx), y0 = Math.floor(cy);
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        const x = x0 + dx, y = y0 + dy;
+        if (!this.valid(x, y) || dx * dx + dy * dy > r * r) continue;
+        const t = this.ref(x, y);
+        if (this.isLand(t)) out.push(t);
+      }
+    }
+    return out;
+  },
   shellImpact(s) {
     const owner = s.owner;
     if (s.kind === 'ship' || s.kind === 'mechAA') {
@@ -208,6 +222,7 @@ module.exports = {
       const u = s.structTile >= 0 ? this.unitAt(s.structTile) : null;
       if (u && this.hostile(owner, u.owner)) { this.events.push({ k: 'structHit', p: u.owner.smallID, type: u.type, x: this.x(u.tile), y: this.y(u.tile) }); this.removeUnit(u); }
       this.neutralizeArea(owner, s.tx, s.ty, 2, 1500, 'missile');
+      for (const t of this.tilesAround(s.tx, s.ty, 2)) this.addFallout(t, 300);
       return;
     }
     if (s.kind === 'artillery') {
@@ -219,7 +234,8 @@ module.exports = {
         const d = (m.x - s.tx) ** 2 + (m.y - s.ty) ** 2;
         if (d <= (s.radius + 1) ** 2 && d < bd) { bd = d; hit = m; }
       }
-      if (hit) hit.hp -= s.dmg;
+      if (hit) hit.hp -= hit.maxHp * this.config.artilleryMechDamageFraction(owner);
+      if (s.target && !s.target.done) this.damageShip(s.target, this.config.warshipHp() * this.config.artilleryShipDamageFraction(owner), owner);
       for (const a of owner.incomingAttacks) {
         if (a.done || a.markX < 0) continue;
         if (Math.hypot(a.markX - s.tx, a.markY - s.ty) <= s.radius + 2) a.troops = Math.max(0, a.troops - s.troopKill);

@@ -143,7 +143,7 @@ module.exports = {
       t.done = true;
       const dstOwner = t.b.owner;
       const rel = dstOwner === t.owner ? 'self' : t.owner.isFriendly(dstOwner) ? 'ally' : 'other';
-      const gold = Math.floor(cfg.trainGold(rel, t.stops) * R.trainGoldMultiplier(t.owner));
+      const gold = Math.floor(cfg.trainGold(rel, t.stops) * R.trainGoldMultiplier(t.owner) * cfg.factoryEfficiency(t.a.level));
       t.owner.addGold(gold);
       if (dstOwner !== t.owner) dstOwner.addGold(Math.floor(gold * 0.5));
       if (t.owner.type === 'human') this.events.push({ k: 'train', to: t.owner.id, gold, p: dstOwner.smallID });

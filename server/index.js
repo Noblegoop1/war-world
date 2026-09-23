@@ -222,8 +222,13 @@ class Lobby {
         if (target === p) return;
         if (target && p.isFriendly(target)) return c.send({ t: 'toast', msg: `You are allied with ${target.name}` });
         // bordering by land? otherwise it must be a boat
+        // Walk if we can, sail only if we must. Sharing a landmass is the test: standing on the same
+        // continent as the tile you clicked means an attack can reach it on foot, even when our border
+        // does not touch it yet. The old test asked whether we bordered them *anywhere*, so clicking
+        // across your own continent put troops on a boat.
         const { players } = g.neighborsOf(p);
-        const borders = target ? players.includes(target) : g.neighborsOf(p).touchesNeutral;
+        const bordersTarget = target ? players.includes(target) : g.neighborsOf(p).touchesNeutral;
+        const borders = bordersTarget || g.onSameLandmass(p, tile);
         if (borders) {
           const troops = g.config.attackAmount(p, ratio);
           if (!g.sendAttack(p, target, troops, null, Number.isInteger(m.focus) ? m.focus : -1)) c.send({ t: 'toast', msg: 'Cannot attack' });
@@ -269,6 +274,12 @@ class Lobby {
       }
       case 'moveMech': { const r = g.moveMech(p, Number(m.id), tile); if (!r.ok) c.send({ t: 'toast', msg: r.reason }); break; }
       case 'moveShip': { const r = g.moveShip(p, Number(m.id), tile); if (!r.ok) c.send({ t: 'toast', msg: r.reason }); break; }
+      case 'airship': {
+        if (tile === null) return;
+        const r = g.launchAirship(p, tile);
+        if (!r.ok) c.send({ t: 'toast', msg: r.reason });
+        break;
+      }
       case 'mechMode': {
         const r = g.setMechMode(p, Number(m.id) || 0, String(m.mode), Number(m.target) || 0);
         if (!r.ok) c.send({ t: 'toast', msg: r.reason });

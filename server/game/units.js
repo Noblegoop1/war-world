@@ -1,7 +1,7 @@
 'use strict';
 // Structures (cities, ports, factories, labs, defense posts, silos, SAMs, mines), walls, and research.
 // Mixed into Game.prototype.
-const { UnitType, STRUCTURE_TYPES, PlayerType, TICKS_PER_SECOND, RESEARCH } = require('./config');
+const { UnitType, STRUCTURE_TYPES, PlayerType, TICKS_PER_SECOND, RESEARCH, RESEARCH_BY_ID } = require('./config');
 const { newId } = require('./ids');
 const R = require('./research').effects;
 
@@ -54,19 +54,25 @@ module.exports = {
     if (this.wallHp[tile]) return { ok: false, reason: 'A wall is in the way' };
     if (type === UnitType.PORT && !this.isOceanShore(tile)) return { ok: false, reason: 'Ports must be built on the sea coast' };
     if (this.settings.disableNukes && (type === UnitType.SILO || type === UnitType.SAM)) return { ok: false, reason: 'Nukes are disabled' };
+    if (type === UnitType.AIRPORT && p.unitsOf(UnitType.AIRPORT).length >= this.config.maxAirports()) return { ok: false, reason: 'You may only have one Airport' };
+    const conflict = this.samAirportConflict(p, type, tile);
+    if (conflict) return { ok: false, reason: conflict };
     if (type === UnitType.REPAIR && !p.researches.has('field_engineering')) return { ok: false, reason: 'Needs the Field Engineering research' };
     if (type === UnitType.LAB) {
       if (this.populationCount(p) < this.config.populationRequiredForLab()) return { ok: false, reason: `Research Labs need ${this.config.populationRequiredForLab()} Cities first` };
       if (this.hasPopulationNear(tile, this.config.labMinGapFromPopulation())) return { ok: false, reason: 'Labs must be away from your Cities' };
       if (!this.factoryInRange(tile, this.config.trainStationMaxRange())) return { ok: false, reason: 'Labs must be within rail range (110 tiles) of a Factory' };
-      if (p.researchCount() >= this.config.maxResearchesPerPlayer()) return { ok: false, reason: 'You have used all your researches' };
+      if (p.researchCount() >= this.config.maxResearchesPerPlayer(p) + this.config.researchesPerLab()) return { ok: false, reason: 'Finish the doctrines you already have room for first' };
     }
     const existing = this.unitAt(tile);
     let upgrade = null;
     const upgradable = type === UnitType.CITY || type === UnitType.PORT || type === UnitType.FACTORY;
     if (existing) {
-      if (existing.owner === p && existing.type === type && upgradable && existing.constructionLeft === 0) upgrade = existing;
-      else return { ok: false, reason: 'Tile already has a structure' };
+      if (existing.owner === p && existing.type === type && upgradable && existing.constructionLeft === 0) {
+        if (existing.level >= this.config.maxUnitLevel(p, type)) return { ok: false, reason: `${type} is at its maximum level (${existing.level})` };
+        upgrade = existing;
+      }
+      else if (!upgrade) return { ok: false, reason: 'Tile already has a structure' };
     } else if (this.unitNear(tile, 2)) return { ok: false, reason: 'Too close to another structure' };
     const count = upgrade ? p.unitLevels(type) : this.costIndex(p, type);
     const cost = this.config.unitCost(type, count, p);
@@ -136,17 +142,20 @@ module.exports = {
           if (d < bd) { bd = d; target = { x: m.x, y: m.y, mech: true }; }
         }
         if (!target) {
-          // otherwise shell the nearest attack coming at us
+          // then enemy warships in reach, then whichever attack is closest
+          const ship = this.nearestEnemyShip(p, gx, gy, range, true);
+          if (ship) target = { x: ship.x, y: ship.y, ship };
+        }
+        if (!target) {
           for (const a of p.incomingAttacks) {
             if (a.done || a.markX < 0) continue;
             const d = (a.markX - gx) ** 2 + (a.markY - gy) ** 2;
-            if (d < bd) { bd = d; target = { x: a.markX, y: a.markY, mech: false }; }
+            if (d < bd) { bd = d; target = { x: a.markX, y: a.markY }; }
           }
         }
         if (!target) continue;
-        this.fireShell(p, u.tile, null, 'artillery', {
-          tx: target.x, ty: target.y, speed: 2.5, life: 120,
-          dmg: this.config.artilleryMechDamage(p),
+        this.fireShell(p, u.tile, target.ship || null, 'artillery', {
+          tx: target.x, ty: target.y, speed: 2.5, life: 200,
           troopKill: this.config.artilleryTroopKill(p),
           radius: this.config.artilleryBlastRadius(),
         });
@@ -348,7 +357,7 @@ module.exports = {
   // ---- research ------------------------------------------------------------------
   labReady(p) { return p.completedUnitsOf(UnitType.LAB).find((u) => u.cooldown === 0) || null; },
   offerResearch(p, lab) {
-    if (p.research || p.pendingChoices || p.researchCount() >= this.config.maxResearchesPerPlayer()) return false;
+    if (p.research || p.pendingChoices || p.researchCount() >= this.config.maxResearchesPerPlayer(p)) return false;
     const taken = p.researches;
     const pool = RESEARCH.filter((r) => !taken.has(r.id) && !(r.id === 'nuclear_subs' && !taken.has('submarine_warfare')));
     if (pool.length < 3) return false;
@@ -363,11 +372,24 @@ module.exports = {
   pickResearch(p, id) {
     if (!p.pendingChoices || !p.pendingChoices.choices.includes(id)) return { ok: false, reason: 'Not an offered research' };
     const lab = this.units.find((u) => u.id === p.pendingChoices.labId);
-    p.research = { id, doneTick: this.tick + this.config.labResearchTicks(), labId: p.pendingChoices.labId };
+    const tier = (RESEARCH_BY_ID[id] && RESEARCH_BY_ID[id].tier) || 2;
+    const ticks = this.config.labResearchTicks(tier);
+    p.research = { id, doneTick: this.tick + ticks, labId: p.pendingChoices.labId };
     p.pendingChoices = null;
-    if (lab) { lab.cooldown = this.config.labResearchTicks() + this.config.labCooldownTicks(); this.unitsChanged = true; }
+    if (lab) { lab.cooldown = ticks + this.config.labCooldownTicks(); this.unitsChanged = true; }
     this.events.push({ k: 'researchStart', p: p.smallID, id });
     return { ok: true };
+  },
+  // A doctrine is only as safe as the building working on it. Lose the lab - bombed, nuked or overrun -
+  // and the work stops; the slot is free again but the progress is gone.
+  onLabLost(u) {
+    const p = u.owner;
+    if (p.pendingChoices && p.pendingChoices.labId === u.id) p.pendingChoices = null;
+    if (p.research && p.research.labId === u.id) {
+      this.events.push({ k: 'researchLost', p: p.smallID, id: p.research.id });
+      p.research = null;
+      this.unitsChanged = true;
+    }
   },
   tickResearch() {
     for (const p of this.players) {
@@ -379,7 +401,7 @@ module.exports = {
         this.unitsChanged = true;
         if (p.ai && p.ai.onResearch) p.ai.onResearch();
       }
-      if (!p.research && !p.pendingChoices && p.researchCount() < this.config.maxResearchesPerPlayer() && this.tick % 10 === 0) {
+      if (!p.research && !p.pendingChoices && p.researchCount() < this.config.maxResearchesPerPlayer(p) && this.tick % 10 === 0) {
         const lab = this.labReady(p);
         if (lab) this.offerResearch(p, lab);
       }

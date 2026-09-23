@@ -69,6 +69,18 @@ const RESEARCH = [
     desc: 'Hydrogen bombs split into 5 atom-sized warheads scattered up to 45 tiles around the target.' },
   { id: 'field_engineering', name: 'Field Engineering', tags: ['defense', 'mech'], ai: { defensive: 1, mechs: 1 },
     desc: 'Unlocks the Repair Yard: it heals your Mechs and rebuilds damaged walls in range. Artillery Batteries also get +15 range, reload 30% faster and hit 50% harder.' },
+  { id: 'megacity', name: 'Megacity Planning', tags: ['econ'], ai: { build: 1.1 }, tier: 3,
+    desc: 'Cities can reach level 4 instead of 3, and a level-4 City is worth far more than the step before it.' },
+  { id: 'heavy_industry', name: 'Heavy Industry', tags: ['econ'], ai: { factories: 3 }, tier: 3,
+    desc: 'Factories can reach level 4. Every level above 2 also makes that factory\u2019s trains pay 35% more.' },
+  { id: 'strategic_airlift', name: 'Strategic Airlift', tags: ['air'], ai: { airships: 2 }, tier: 3,
+    desc: 'Airships carry 10% of your troops instead of 5%, fly 50% faster and reach 120 tiles further.' },
+  { id: 'airbase_network', name: 'Airbase Network', tags: ['air'], ai: { airships: 1 }, tier: 2,
+    desc: 'A fourth airship, 30% cheaper airships, and SAM Launchers may finally sit next to your Airport.' },
+  { id: 'airborne_doctrine', name: 'Airborne Doctrine', tags: ['air', 'aggro'], ai: { airships: 1, aggression: 1.1 }, tier: 2,
+    desc: 'Troops dropped by airship land 35% stronger.' },
+  { id: 'interceptor_screen', name: 'Interceptor Screen', tags: ['defense', 'air'], ai: { defensive: 1 }, tier: 2,
+    desc: 'Fighters scramble from your Cities, SAMs and Airport: enemy airships passing within 60 tiles have a 45% chance of being shot down. The only answer to an airlift.' },
   { id: 'nuclear_deterrence', name: 'Nuclear Deterrence', tags: ['nuke', 'defense'], ai: {},
     desc: 'If someone nukes you while you have a ready silo and 750K gold, an atom bomb automatically answers at their nearest silo (or city).' },
 ];
@@ -107,6 +119,19 @@ const effects = {
   wallDamageMultiplier: (p) => (has(p, 'hardened_infra') ? 0.5 : 1),
   // Fraction of a warship's health a defense post shell takes off. Deliberately tiny: posts drive ships
   // off over time instead of deleting them. Coastal Defense Network is what makes them actually dangerous.
+  // One doctrine may raise ONE building type's ceiling from 3 to 4, and that last level is a big jump.
+  // ---- air power ----
+  airshipCapBonus: (p) => (has(p, 'airbase_network') ? 1 : 0),
+  airshipCostMultiplier: (p) => (has(p, 'airbase_network') ? 0.7 : 1),
+  airshipCapacityMultiplier: (p) => (has(p, 'strategic_airlift') ? 2 : 1),
+  airshipSpeedMultiplier: (p) => (has(p, 'strategic_airlift') ? 1.5 : 1),
+  airshipRangeBonus: (p) => (has(p, 'strategic_airlift') ? 120 : 0),
+  airdropBonus: (p) => (has(p, 'airborne_doctrine') ? 1.35 : 1),
+  samNearAirport: (p) => has(p, 'airbase_network'),
+  interceptsAirships: (p) => has(p, 'interceptor_screen'),
+  interceptorRangeBonus: (p) => (has(p, 'fighter_networks') ? 40 : 0),
+  interceptorChanceMultiplier: (p) => (has(p, 'fighter_networks') ? 1.4 : 1),
+  maxLevelBonus: (p, type) => ((type === 'city' && has(p, 'megacity')) || (type === 'factory' && has(p, 'heavy_industry')) ? 1 : 0),
   artilleryRangeBonus: (p) => (has(p, 'field_engineering') ? 15 : 0),
   artilleryReloadMultiplier: (p) => (has(p, 'field_engineering') ? 0.7 : 1),
   artilleryDamageMultiplier: (p) => (has(p, 'field_engineering') ? 1.5 : 1),

@@ -125,6 +125,8 @@ const UNIT_INFO = {
   mine: { label: 'Naval Mine', key: '', desc: 'Place on the sea within 60 tiles of your port. Destroys any enemy ship or boat passing within 2 tiles.', cost: () => 50000, needs: 'naval_mines' },
   artillery: { label: 'Artillery Battery', key: '', desc: 'A static gun with 45-tile reach. It shells enemy Mechs first — this is the answer to a Mech parked on your border — and otherwise drops shells on the nearest attack coming at you. It never takes ground.', cost: (n) => Math.min(2500000, (n + 1) * 400000) },
   repair: { label: 'Repair Yard', key: '', desc: 'Heals your Mechs and rebuilds damaged wall tiles within 40 tiles. Put it behind the front, not on it.', cost: (n) => Math.min(2000000, (n + 1) * 500000), needs: 'field_engineering' },
+  airport: { label: 'Airport', key: '', desc: 'One per nation, and enormously expensive. Flies Airships over SAMs, warships and coastal defenses to drop troops inland — the way into a nation that has sealed every other route. Your own SAMs cannot sit within 70 tiles of it unless you research Airbase Network.', cost: () => 8000000 },
+  airship: { label: 'Airship', key: '', desc: 'Carries 5% of your troops (10% with Strategic Airlift) to any land tile in range. SAMs cannot touch it and warships cannot reach it; only an enemy Interceptor Screen can bring it down. Max 3 in the air, each one costs more than the last.', cost: (n) => 1000000 + n * 750000 },
   bomber: { label: 'Bomber Strike', key: '', desc: 'Click an enemy structure within 250 tiles of your silo: a bomber flies over and destroys it. Fighter Networks can shoot it down.', cost: () => 300000, needs: 'strategic_bombers' },
 };
 const NUKE_INFO = {
@@ -132,8 +134,8 @@ const NUKE_INFO = {
   hydrogen: { label: 'Hydrogen Bomb', key: 'H', desc: 'Destroys everything within 80 tiles, most within 100.', cost: 5000000 },
 };
 const HOTBAR = ['city', 'port', 'factory', 'defense', 'silo', 'sam', 'lab', 'wall', 'mech', 'warship'];
-const HOTBAR2 = ['artillery', 'repair', 'atom', 'hydrogen', 'submarine', 'mine', 'bomber'];
-const ICON_FOR = { city: 'city', port: 'port', factory: 'factory', defense: 'defense', silo: 'silo', sam: 'sam', lab: 'info', wall: 'build', mech: 'target', warship: 'warship', submarine: 'warship', mine: 'mine', bomber: 'explosion', atom: 'atom', hydrogen: 'hydrogen', artillery: 'sword', repair: 'troops' };
+const HOTBAR2 = ['artillery', 'repair', 'airport', 'airship', 'atom', 'hydrogen', 'submarine', 'mine', 'bomber'];
+const ICON_FOR = { city: 'city', port: 'port', factory: 'factory', defense: 'defense', silo: 'silo', sam: 'sam', lab: 'info', wall: 'build', mech: 'target', warship: 'warship', submarine: 'warship', mine: 'mine', bomber: 'explosion', atom: 'atom', hydrogen: 'hydrogen', artillery: 'sword', repair: 'troops', airport: 'boat', airship: 'boat' };
 let RESEARCH_DEFS = [];
 
 // =============================================================================
@@ -261,7 +263,7 @@ $('lobby-chat-input').addEventListener('keydown', (e) => { if (e.key === 'Enter'
 const G = {
   active: false, W: 0, H: 0, numLand: 1, terrain: null, owner: null, fallout: null, wall: null,
   players: new Map(), me: 0, tick: 0, phase: 'spawn', spawnLeft: 0, settings: null, mapName: '',
-  units: [], attacks: [], boats: [], trade: [], nukes: [], ships: [], mechs: [], shells: [], trains: [], rails: [], bombers: [],
+  units: [], attacks: [], boats: [], trade: [], nukes: [], ships: [], mechs: [], airships: [], shells: [], trains: [], rails: [], bombers: [],
   allyReqs: [], effects: [], winner: 0, labels: new Map(), lastLabelTick: -100, ctl: { paused: false, speed: 1 }, unitByTile: new Map(),
   lastPacketAt: 0,
 };
@@ -282,7 +284,10 @@ let mechFrom = -1;
 // the point: the old tile-space radius shrank as you zoomed in, so at high zoom you could click the
 // middle of a mech's icon and still hit the ground underneath it.
 const PICK_RADIUS_PX = 30;
+const MOBILE_KINDS = ['mech', 'warship', 'submarine'];
 let hoverUnit = null;   // own mobile unit under the cursor, for the hover ring
+let selection = [];     // several units selected by shift-dragging a box
+let boxSelect = null;   // {x0,y0,x1,y1,kind} while dragging
 
 function me() { return G.players.get(G.me); }
 function pname(sm) { const p = G.players.get(sm); return p ? p.name : (sm === 0 ? 'Unclaimed land' : '?'); }
@@ -320,7 +325,7 @@ function startGame(m) {
   G.wall = new Uint8Array(G.W * G.H);
   G.fort = null; G.fortKey = '';
   if (s.walls) { const wb = b64ToBytes(s.walls); const wh = new Uint16Array(wb.buffer, wb.byteOffset, wb.byteLength / 2); for (let i = 0; i < wh.length; i++) if (wh[i]) G.wall[i] = 1; }
-  G.mechs = s.mechs || []; G.rails = s.rails || []; G.ships = []; G.shells = []; G.trains = []; G.bombers = [];
+  G.mechs = s.mechs || []; G.airships = []; G.rails = s.rails || []; G.ships = []; G.shells = []; G.trains = []; G.bombers = [];
   RESEARCH_DEFS = s.research || [];
   wallDraw = null; selected = null; mechFrom = -1; lerpState.clear();
   closeResearchPicker();
@@ -428,10 +433,13 @@ function isBorder(i) {
 function paintTile(i) {
   const d = ownerImg.data, k = i * 4;
   const o = G.owner[i];
-  if (o === 0) {
-    if (G.fallout[i]) { d[k] = 96; d[k + 1] = 86; d[k + 2] = 106; d[k + 3] = 185; } else d[k + 3] = 0;
+  // Irradiated ground reads as a sickly green-grey scar, on top of whoever owns it. It wears off.
+  if (G.fallout[i]) {
+    const lit = ((i % G.W) + ((i / G.W) | 0)) & 3;
+    d[k] = 104 + lit * 6; d[k + 1] = 124 + lit * 8; d[k + 2] = 86 + lit * 4; d[k + 3] = o ? 215 : 195;
     return;
   }
+  if (o === 0) { d[k + 3] = 0; return; }
   const p = G.players.get(o);
   if (!p) { d[k + 3] = 0; return; }
   if (G.wall[i]) { // wall: dark stone, lighter seam on the border of the wall band
@@ -468,7 +476,7 @@ function applyStats(stats) {
     const r = s[8] || [[], null, null];
     p.researches = r[0] || []; p.researching = r[1]; p.choices = r[2];
     p.atk = s[9] || 0; p.eco = s[10] || 0; p.walls = s[11] || 0; p.mechCount = s[12] || 0; p.warshipCount = s[13] || 0; p.subCount = s[14] || 0;
-    p.deployed = s[15] || 0;
+    p.deployed = s[15] || 0; p.airships = s[16] || 0; p.airshipsBuilt = s[17] || 0; p.maxResearch = s[18] || 2;
     p.spawned = !!(s[4] & 1); p.alive = !!(s[4] & 2); p.traitor = !!(s[4] & 4); p.offline = !!(s[4] & 8);
     if (p.sm === G.me && p.choices && p.choices.length && !researchPickerOpen && !researchDismissed) openResearchPicker(p.choices);
   }
@@ -494,6 +502,7 @@ function applyTick(m) {
   if (m.trade) G.trade = m.trade;
   if (m.nukes) G.nukes = m.nukes;
   if (m.mechs) G.mechs = m.mechs;
+  if (m.airships) G.airships = m.airships;
   if (Array.isArray(m.ships)) G.ships = m.ships;
   if (m.shells) G.shells = m.shells;
   if (m.trains) G.trains = m.trains;
@@ -546,6 +555,10 @@ function handleEvent(e) {
     case 'mine': logEvent(`${esc(pname(e.by))}'s mine destroyed a ship`, mine(e.by) ? 'good' : ''); G.effects.push({ x: e.x, y: e.y, r: 4, t0: performance.now(), dur: 900 }); break;
     case 'volley': logEvent(`${esc(pname(e.p))}'s submarine fired a missile volley`, mine(e.p) ? 'good' : 'bad'); break;
     case 'bomber': logEvent(`${esc(pname(e.by))} sent a bomber at ${esc(pname(e.target))}`, mine(e.target) ? 'bad' : ''); break;
+    case 'airship': logEvent(`\u2708 ${esc(pname(e.by))} launched an airship${e.target ? ' at ' + esc(pname(e.target)) : ''}`, mine(e.target) ? 'bad' : mine(e.by) ? 'good' : ''); break;
+    case 'airshipDown': logEvent(`${esc(pname(e.by))}'s interceptors shot down ${esc(pname(e.p))}'s airship`, mine(e.by) ? 'good' : mine(e.p) ? 'bad' : ''); G.effects.push({ x: e.x, y: e.y, r: 5, t0: performance.now(), dur: 900 }); break;
+    case 'airdrop': logEvent(`\u2708 ${esc(pname(e.by))} dropped ${fmt(e.troops)} troops${e.p ? ' into ' + esc(pname(e.p)) : ''}`, mine(e.p) ? 'bad' : mine(e.by) ? 'good' : ''); G.effects.push({ x: e.x, y: e.y, r: 6, t0: performance.now(), dur: 1200, ring: true }); break;
+    case 'researchLost': logEvent(`${esc(pname(e.p))} lost the lab working on <b>${esc(researchName(e.id))}</b> — research cancelled`, mine(e.p) ? 'bad' : ''); break;
     case 'bomberDown': logEvent(`${esc(pname(e.by))}'s fighters shot down a bomber`, mine(e.by) ? 'good' : ''); G.effects.push({ x: e.x, y: e.y, r: 4, t0: performance.now(), dur: 900 }); break;
     case 'deterrence': logEvent(`☢ ${esc(pname(e.by))}'s nuclear deterrence retaliated against ${esc(pname(e.at))}`, 'bad'); break;
     default: break;
@@ -667,6 +680,8 @@ function havePort() { return G.units.some((u) => u[1] === 'port' && u[2] === G.m
 function itemCost(key) {
   const p = me();
   if (G.settings && G.settings.infiniteGold) return 0;
+  if (key === 'airship') return UNIT_INFO.airship.cost(p ? p.airshipsBuilt || 0 : 0);
+  if (key === 'airport') return 8000000;
   const disc = myHas('mass_production') ? 0.85 : 1;
   if (key === 'wall') return wallDraw && wallDraw.quote ? wallDraw.quote.cost : 0;
   if (key === 'mech') return UNIT_INFO.mech.cost(p ? p.mechCount || 0 : 0) * (myHas('mech_production') ? 0.6 : 1) * (myHas('military_industrial') ? 0.75 : 1) * disc;
@@ -697,19 +712,23 @@ function itemCan(key) {
   if ((key === 'warship' || key === 'submarine') && !havePort()) return false;
   if ((key === 'atom' || key === 'hydrogen') && !haveReadySilo()) return false;
   if (key === 'bomber' && !myUnitCount('silo')) return false;
+  if (key === 'airship' && !myUnitCount('airport')) return false;
+  if (key === 'airport' && myUnitCount('airport') >= 1) return false;
   return true;
 }
 function isActivePlacement(key) {
   if (!placement) return false;
   if (placement.kind === 'wall') return key === 'wall';
   if (placement.kind === 'nuke') return placement.type === key;
+  if (placement.kind === 'airship') return key === 'airship';
   return placement.unit === key;
 }
 function renderHotbar() {
   const p = me();
   const row = (keys) => keys.filter((k) => itemAvailable(k)).map((key) => {
     const info = UNIT_INFO[key] || NUKE_INFO[key];
-    const count = key === 'mech' ? (p ? p.mechCount || 0 : 0) : key === 'warship' ? (p ? p.warshipCount || 0 : 0) : key === 'submarine' ? (p ? p.subCount || 0 : 0) : key === 'wall' ? (p ? p.walls || 0 : 0) : UNIT_INFO[key] && !['bomber'].includes(key) ? myUnitCount(key) : '';
+    const count = key === 'airship' ? (p ? p.airships || 0 : 0)
+      : key === 'mech' ? (p ? p.mechCount || 0 : 0) : key === 'warship' ? (p ? p.warshipCount || 0 : 0) : key === 'submarine' ? (p ? p.subCount || 0 : 0) : key === 'wall' ? (p ? p.walls || 0 : 0) : UNIT_INFO[key] && !['bomber'].includes(key) ? myUnitCount(key) : '';
     return `<div class="hb ${isActivePlacement(key) ? 'active' : ''} ${itemCan(key) ? '' : 'cant'}" data-key="${key}"><span class="key">${info.key}</span><img src="${iconURL[ICON_FOR[key] || key] || ''}" alt=""><span class="count">${count}</span></div>`;
   }).join('');
   const html = row(HOTBAR) + `<div class="hb-sep"></div>` + row(HOTBAR2);
@@ -739,6 +758,7 @@ function togglePlacement(key) {
   wallDraw = null; selected = null;
   if (same) { placement = null; renderHotbar(); return; }
   if (key === 'wall') placement = { kind: 'wall' };
+  else if (key === 'airship') placement = { kind: 'airship' };
   else if (NUKE_INFO[key]) placement = { kind: 'nuke', type: key };
   else if (key === 'mech') placement = { kind: 'build', unit: 'mech', from: mechFrom };
   else placement = { kind: 'build', unit: key };
@@ -908,9 +928,22 @@ function openMechRadial(mech, sx, sy) {
   const cur = MECH_MODES.find((m) => m.id === mode);
   radialItems(items, { html: `<b>Mech L${mech[7]}</b><span class="muted">${esc(cur ? cur.label : mode)}</span>` }, sx, sy);
 }
+// Nearest structure to a screen point, within the same generous radius used for mobile units.
+function nearestStructureAt(sx, sy, maxPx = PICK_RADIUS_PX) {
+  let best = null, bd = maxPx * maxPx;
+  for (const u of G.units) {
+    const x = cam.x + (tileX(u[3]) + 0.5) * cam.zoom, y = cam.y + (tileY(u[3]) + 0.5) * cam.zoom;
+    const d = (x - sx) ** 2 + (y - sy) ** 2;
+    if (d < bd) { bd = d; best = u; }
+  }
+  return best;
+}
 function openRadial(tile, sx, sy) {
   const p = me();
   if (!p) return;
+  // ...and the same when you right-click for the build/upgrade menu
+  const near = nearestStructureAt(sx, sy);
+  if (near && near[3] !== tile && G.owner[near[3]] === G.me) tile = near[3];
   // your own mech under the cursor takes priority over whatever tile it is standing on
   const own = nearestOwnMobileAt(sx, sy);
   if (own && own.kind === 'mech') { const m = mechById(own.id); if (m) return openMechRadial(m, sx, sy); }
@@ -1030,6 +1063,13 @@ function updateWallQuote(force) {
 }
 canvas.addEventListener('mousedown', (e) => {
   mouse.down = true; mouse.button = e.button; mouse.sx = mouse.lastX = e.clientX; mouse.sy = mouse.lastY = e.clientY; mouse.dragging = false;
+  // Shift-drag is always a selection box, never a build. With a unit button armed it selects that kind
+  // of unit, so "mech" + shift-drag grabs your mechs and leaves your warships alone.
+  if (e.button === 0 && e.shiftKey && G.phase === 'play') {
+    const kind = placement && placement.kind === 'build' && MOBILE_KINDS.includes(placement.unit) ? placement.unit : null;
+    boxSelect = { x0: e.clientX, y0: e.clientY, x1: e.clientX, y1: e.clientY, kind };
+    return;
+  }
   if (e.button === 0 && placement && placement.kind === 'wall' && G.phase === 'play') {
     const t = screenToTile(e.clientX, e.clientY);
     if (t >= 0 && G.owner[t] === G.me) { wallDraw = { pts: [t], quote: null }; updateWallQuote(true); }
@@ -1043,6 +1083,7 @@ window.addEventListener('mousemove', (e) => {
   hoverUnit = hoverTile >= 0 && !placement ? nearestOwnMobileAt(e.clientX, e.clientY) : null;
   canvas.style.cursor = hoverUnit ? 'pointer' : '';
   if (!mouse.down) return;
+  if (boxSelect) { boxSelect.x1 = e.clientX; boxSelect.y1 = e.clientY; return; }
   if (wallDraw) {
     if (hoverTile >= 0) {
       const last = wallDraw.pts[wallDraw.pts.length - 1];
@@ -1059,6 +1100,30 @@ window.addEventListener('mousemove', (e) => {
 window.addEventListener('mouseup', (e) => {
   if (!mouse.down) return;
   mouse.down = false;
+  if (boxSelect) {
+    const b = boxSelect; boxSelect = null;
+    const lo = (a, c) => Math.min(a, c), hi = (a, c) => Math.max(a, c);
+    const x0 = lo(b.x0, b.x1), x1 = hi(b.x0, b.x1), y0 = lo(b.y0, b.y1), y1 = hi(b.y0, b.y1);
+    if (x1 - x0 < 4 && y1 - y0 < 4) return;
+    const hits = [];
+    const add = (kind, id, wx, wy, key) => {
+      if (b.kind && b.kind !== kind) return;
+      const [lx, ly] = lerpPeek(key, wx, wy);
+      const x = cam.x + lx * cam.zoom, y = cam.y + ly * cam.zoom;
+      if (x >= x0 && x <= x1 && y >= y0 && y <= y1) hits.push({ kind, id });
+    };
+    for (const m of G.mechs) if (m[1] === G.me) add('mech', m[0], m[2], m[3], 'mech' + m[0]);
+    for (const sh of G.ships) if (sh[2] === G.me) add(sh[1], sh[0], sh[3], sh[4], 'ship' + sh[0]);
+    selection = hits;
+    selected = hits.length === 1 ? hits[0] : null;
+    if (hits.length) {
+      placement = null; renderHotbar();
+      const kinds = {};
+      for (const h of hits) kinds[h.kind] = (kinds[h.kind] || 0) + 1;
+      toast(`Selected ${Object.entries(kinds).map(([k, n]) => `${n} ${k}${n > 1 ? 's' : ''}`).join(', ')} — click to order them`, true);
+    } else toast('Nothing selected');
+    return;
+  }
   if (wallDraw) {
     if (hoverTile >= 0 && hoverTile !== wallDraw.pts[wallDraw.pts.length - 1]) wallDraw.pts.push(hoverTile);
     send({ t: 'wall', tiles: wallDraw.pts });
@@ -1091,8 +1156,14 @@ function onLeftClick(sx, sy, shift) {
   if (G.phase === 'spawn') { if (!isLand(tile)) return toast('Spawn must be on land'); send({ t: 'spawn', tile }); return; }
   const p = me();
   if (!p || !p.alive) return;
-  // a selected mech/ship: this click is its move order
-  if (selected) { send({ t: selected.kind === 'mech' ? 'moveMech' : 'moveShip', id: selected.id, tile }); selected = null; return; }
+  // a selected mech/ship (or a whole box of them): this click is the move order
+  if (selection.length > 1) {
+    for (const u of selection) send({ t: u.kind === 'mech' ? 'moveMech' : 'moveShip', id: u.id, tile });
+    toast(`${selection.length} units ordered`, true);
+    selection = []; selected = null;
+    return;
+  }
+  if (selected) { send({ t: selected.kind === 'mech' ? 'moveMech' : 'moveShip', id: selected.id, tile }); selected = null; selection = []; return; }
   if (placement) {
     if (placement.kind === 'wall') return;
     if (placement.kind === 'assault') {
@@ -1102,6 +1173,7 @@ function onLeftClick(sx, sy, shift) {
       placement = null; renderHotbar();
       return;
     }
+    if (placement.kind === 'airship') { send({ t: 'airship', tile }); if (!keys.shift) { placement = null; renderHotbar(); } return; }
     if (placement.kind === 'build') {
       if (placement.unit === 'mech' && shift) { const u = G.unitByTile.get(tile); if (u && u[1] === 'factory' && u[2] === G.me && u[4] >= 2) { mechFrom = tile; placement.from = tile; toast('Mechs will build at this factory', true); return; } }
       send({ t: 'build', unit: placement.unit, tile, from: placement.from ?? -1 });
@@ -1112,6 +1184,10 @@ function onLeftClick(sx, sy, shift) {
   // click near one of your mobile units selects it
   const mob = nearestOwnMobileAt(sx, sy);
   if (mob) { selected = mob; toast(`${mob.kind} selected — click where it should go, or right-click it for orders (Esc to cancel)`, true); return; }
+  // A structure under the cursor is almost always what you meant to click, so snap to the nearest one
+  // within a comfortable pixel radius instead of making the player zoom in to hit a 6px hexagon.
+  const structure = nearestStructureAt(sx, sy);
+  if (structure && structure[2] === G.me) { openRadial(structure[3], sx, sy); return; }
   const o = G.owner[tile];
   if (o === G.me) { if (!shift) openRadial(tile, sx, sy); return; }
   if (!isLand(tile)) { if (!(G.settings && G.settings.disableBoats)) send({ t: 'boat', tile, ratio }); return; }
@@ -1119,7 +1195,7 @@ function onLeftClick(sx, sy, shift) {
   send({ t: 'attack', tile, ratio, focus: tile });
 }
 function onRightClick(sx, sy) {
-  if (selected) { selected = null; return; }
+  if (selected || selection.length) { selected = null; selection = []; return; }
   if (placement) { placement = null; wallDraw = null; renderHotbar(); return; }
   if (!radialEl.classList.contains('hidden')) { closeRadial(); return; }
   const tile = screenToTile(sx, sy);
@@ -1134,7 +1210,7 @@ window.addEventListener('keydown', (e) => {
   if (typing) return;
   const k = e.key.toLowerCase();
   if (e.key === 'Enter') { openChat(); e.preventDefault(); return; }
-  if (e.key === 'Escape') { closeRadial(); closeResearchPicker(); placement = null; wallDraw = null; selected = null; renderHotbar(); pinnedCard = 0; $('player-card').classList.add('hidden'); $('settings-popup').classList.add('hidden'); return; }
+  if (e.key === 'Escape') { closeRadial(); closeResearchPicker(); placement = null; wallDraw = null; selected = null; selection = []; boxSelect = null; renderHotbar(); pinnedCard = 0; $('player-card').classList.add('hidden'); $('settings-popup').classList.add('hidden'); return; }
   if (k === 'a') { if (hoverTile >= 0 && G.phase === 'play') send({ t: 'attack', tile: hoverTile, ratio, focus: hoverTile }); return; }
   if (k === 'b') { if (hoverTile >= 0 && G.phase === 'play') send({ t: 'boat', tile: hoverTile, ratio }); return; }
   if (k === 'r') { const inc = G.attacks.filter((a) => a[2] === G.me); if (inc.length) send({ t: 'attackPlayer', p: inc[inc.length - 1][1], ratio }); return; }
@@ -1169,7 +1245,7 @@ function shapePath(type, x, y, r) {
   ctx.beginPath();
   if (type === 'city') { ctx.arc(x, y, r, 0, Math.PI * 2); return; }
   if (type === 'mine') { ctx.arc(x, y, r * 0.7, 0, Math.PI * 2); return; }
-  const sides = type === 'port' ? 5 : type === 'defense' ? 8 : type === 'silo' ? 3 : type === 'sam' ? 4 : type === 'lab' ? 7 : type === 'artillery' ? 3 : type === 'repair' ? 4 : 6;
+  const sides = type === 'port' ? 5 : type === 'defense' ? 8 : type === 'silo' ? 3 : type === 'sam' ? 4 : type === 'lab' ? 7 : type === 'artillery' ? 3 : type === 'repair' ? 4 : type === 'airport' ? 4 : 6;
   const rot = type === 'port' || type === 'silo' || type === 'lab' ? -Math.PI / 2 : type === 'artillery' ? Math.PI / 2 : type === 'defense' ? Math.PI / 8 : type === 'sam' || type === 'repair' ? Math.PI / 4 : Math.PI / 6;
   for (let i = 0; i < sides; i++) {
     const a = rot + (i / sides) * Math.PI * 2;
@@ -1336,7 +1412,7 @@ function draw() {
     const [lx, ly] = lerpPos('ship' + id, wx, wy);
     const [x, y] = toScreen(lx, ly);
     if (!visible(x, y)) continue;
-    const isSel = selected && selected.id === id;
+    const isSel = (selected && selected.id === id) || selection.some((u) => u.id === id);
     if (kind === 'warship') { drawSprite('warship', ownerSm, lx, ly, 1.4); }
     else { // submarine: dark ellipse in owner colour outline
       const r = clamp(5 * cam.zoom, 6, 18);
@@ -1371,6 +1447,29 @@ function draw() {
     ctx.save(); ctx.translate(x, y); ctx.rotate(ang);
     ctx.beginPath(); ctx.moveTo(s, 0); ctx.lineTo(-s * 0.7, s * 0.6); ctx.lineTo(-s * 0.3, 0); ctx.lineTo(-s * 0.7, -s * 0.6); ctx.closePath();
     ctx.fillStyle = p ? p.color : '#fff'; ctx.fill(); ctx.strokeStyle = '#111'; ctx.lineWidth = 1.5; ctx.stroke(); ctx.restore();
+  }
+  // airships: a fat lozenge with a troop count, deliberately unlike any boat
+  for (const a of G.airships) {
+    const [id, ownerSm, ax, ay, tx, ty, troops] = a;
+    const q = G.players.get(ownerSm);
+    const [lx, ly] = lerpPos('air' + id, ax, ay);
+    const [x, y] = toScreen(lx, ly);
+    if (!visible(x, y)) continue;
+    const ang = Math.atan2(ty - ly, tx - lx);
+    const w = clamp(9 * cam.zoom, 14, 34), h = w * 0.42;
+    ctx.save(); ctx.translate(x, y); ctx.rotate(ang);
+    ctx.beginPath(); ctx.ellipse(0, 0, w / 2, h / 2, 0, 0, Math.PI * 2);
+    ctx.fillStyle = q ? q.color : '#fff'; ctx.fill();
+    ctx.lineWidth = 2; ctx.strokeStyle = '#1b1f26'; ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(-w * 0.1, h / 2); ctx.lineTo(w * 0.1, h / 2); ctx.lineTo(0, h * 0.95); ctx.closePath();
+    ctx.fillStyle = '#1b1f26'; ctx.fill();
+    ctx.restore();
+    if (cam.zoom > 1) {
+      ctx.font = `bold ${clamp(4 * cam.zoom, 10, 15)}px system-ui, sans-serif`;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+      ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(0,0,0,0.8)'; ctx.fillStyle = '#fff';
+      ctx.strokeText(fmt(troops), x, y - h); ctx.fillText(fmt(troops), x, y - h);
+    }
   }
   // nukes on their arcs
   for (const nk of G.nukes) {
@@ -1407,7 +1506,7 @@ function draw() {
     const [x, y] = toScreen(lx, ly);
     if (!visible(x, y)) continue;
     const r = clamp(7 * cam.zoom, 9, 24);
-    const isSel = selected && selected.kind === 'mech' && selected.id === id;
+    const isSel = (selected && selected.kind === 'mech' && selected.id === id) || selection.some((u) => u.kind === 'mech' && u.id === id);
     const isHover = hoverUnit && hoverUnit.kind === 'mech' && hoverUnit.id === id;
     // the ground a mech holds: attacks inside this bleed 3x troops and crawl (config mechAuraRange)
     if (ownerSm === G.me && (isSel || isHover)) {
@@ -1473,6 +1572,18 @@ function draw() {
     ctx.fillStyle = q.ok && q.afford ? 'rgba(20,60,20,0.9)' : 'rgba(80,20,20,0.9)';
     ctx.fillRect(mouse.x + 12, mouse.y - 30, w, 22);
     ctx.fillStyle = '#fff'; ctx.fillText(txt, mouse.x + 18, mouse.y - 12);
+  }
+  // selection box
+  if (boxSelect) {
+    const x = Math.min(boxSelect.x0, boxSelect.x1), y = Math.min(boxSelect.y0, boxSelect.y1);
+    const w = Math.abs(boxSelect.x1 - boxSelect.x0), h = Math.abs(boxSelect.y1 - boxSelect.y0);
+    ctx.fillStyle = 'rgba(120, 200, 255, 0.12)'; ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = 'rgba(160, 220, 255, 0.9)'; ctx.lineWidth = 1.5; ctx.setLineDash([5, 4]);
+    ctx.strokeRect(x, y, w, h); ctx.setLineDash([]);
+    if (boxSelect.kind) {
+      ctx.font = 'bold 12px system-ui, sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'bottom';
+      ctx.fillStyle = '#cfe8ff'; ctx.fillText(`selecting ${boxSelect.kind}s`, x + 2, y - 3);
+    }
   }
   // labels
   if (opts.labels) {

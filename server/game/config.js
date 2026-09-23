@@ -4,9 +4,9 @@
 
 const TerrainType = { WATER: 0, PLAINS: 1, HIGHLAND: 2, MOUNTAIN: 3 };
 const PlayerType = { HUMAN: 'human', NATION: 'nation', BOT: 'bot' };
-const UnitType = { CITY: 'city', PORT: 'port', DEFENSE_POST: 'defense', SILO: 'silo', SAM: 'sam', LAB: 'lab', FACTORY: 'factory', WALL: 'wall', MECH: 'mech', WARSHIP: 'warship', SUBMARINE: 'submarine', MINE: 'mine', ARTILLERY: 'artillery', REPAIR: 'repair' };
+const UnitType = { CITY: 'city', PORT: 'port', DEFENSE_POST: 'defense', SILO: 'silo', SAM: 'sam', LAB: 'lab', FACTORY: 'factory', WALL: 'wall', MECH: 'mech', WARSHIP: 'warship', SUBMARINE: 'submarine', MINE: 'mine', ARTILLERY: 'artillery', REPAIR: 'repair', AIRPORT: 'airport' };
 // Fixed structures (live on a tile). Mobile units (mech/warship/submarine) are handled by their own systems.
-const STRUCTURE_TYPES = ['city', 'port', 'defense', 'silo', 'sam', 'lab', 'factory', 'mine', 'artillery', 'repair'];
+const STRUCTURE_TYPES = ['city', 'port', 'defense', 'silo', 'sam', 'lab', 'factory', 'mine', 'artillery', 'repair', 'airport'];
 const { effects: R } = require('./research');
 // Structures that count as "population" (a nation's civilian centers). Labs & walls can't be built near these.
 const POPULATION_TYPES = ['city'];
@@ -153,6 +153,8 @@ class Config {
   trainStationMaxRange() { return 110; }
   railroadMaxSize() { return Math.floor(110 * 1.4142); }
   trainSpawnRate(numFactories) { return (numFactories + 10) * 15; } // expected ticks between trains per factory level
+  // A factory above level 2 isn't just bigger, it's better run: more gold per delivery from that station.
+  factoryEfficiency(level) { return 1 + Math.max(0, level - 2) * 0.35; }
   trainGold(rel, stopsVisited) {
     const base = rel === 'ally' ? 35000 : rel === 'self' ? 10000 : 25000;
     return Math.max(5000, base - Math.max(0, stopsVisited - 9) * 5000);
@@ -164,6 +166,12 @@ class Config {
   traitorDefenseDebuff() { return 1.5; }
   traitorSpeedDebuff() { return 0.75; }
   falloutDefenseModifier(ratio) { return 5 - ratio * 2; }
+  // How long ground stays irradiated, in ticks. Long enough to matter, short enough that the map heals.
+  falloutDuration(type) { return type === 'hydrogen' ? 2400 : type === 'warhead' ? 700 : 1200; }
+  // Troops lost per tile of theirs that a blast erases, as a share of their standing army. OpenFront
+  // applies a per-tile death factor like this; troops in transit die with the rest.
+  nukeDeathFactor(troops, tilesOwned) { return (5 * troops) / Math.max(1, tilesOwned); }
+  nukeMaxTroopLoss() { return 0.75; }
   allianceRequestTimeoutTicks() { return 30 * TICKS_PER_SECOND; }
 
   constructionTicks(type) {
@@ -177,6 +185,7 @@ class Config {
       case UnitType.LAB: return 100;
       case UnitType.MECH: return 80;
       case UnitType.ARTILLERY: return 90;
+      case UnitType.AIRPORT: return 200;
       case UnitType.REPAIR: return 70;
       default: return 0;
     }
@@ -193,7 +202,7 @@ class Config {
       case UnitType.DEFENSE_POST: return Math.min(250000, (numOwned + 1) * 50000) * d;
       case UnitType.SILO: return 1000000 * d;
       case UnitType.SAM: return Math.min(3000000, (numOwned + 1) * 1500000) * d;
-      case UnitType.LAB: return 1000000 * d;
+      case UnitType.LAB: return 1000000 * this.labCostMultiplier(numOwned) * d;
       case UnitType.MINE: return 50000 * d;
       case UnitType.WARSHIP: {
         let c = Math.min(1000000, (numOwned + 1) * 250000);
@@ -204,6 +213,7 @@ class Config {
       // Mechs are national-scale assets: brutally expensive, escalating hard per mech owned.
       case UnitType.MECH: return (2000000 + numOwned * 2500000) * R.mechCostMultiplier(player) * d;
       case UnitType.ARTILLERY: return Math.min(2500000, (numOwned + 1) * 400000) * d;
+      case UnitType.AIRPORT: return 8000000 * d;
       case UnitType.REPAIR: return Math.min(2000000, (numOwned + 1) * 500000) * d;
       default: return 0;
     }
@@ -218,7 +228,17 @@ class Config {
   wallThickness() { return 3; }
   labResearchTicks() { return 60 * TICKS_PER_SECOND; }
   labCooldownTicks() { return 45 * TICKS_PER_SECOND; }
-  maxResearchesPerPlayer() { return 2; }
+  // Each finished lab is worth two doctrines, and every lab after the first costs five times the last.
+  // Wanting a fourth doctrine is a real economic decision rather than a formality.
+  researchesPerLab() { return 2; }
+  maxResearchesPerPlayer(player) { return this.researchesPerLab() * Math.max(1, this.completedLabs(player)); }
+  completedLabs(player) { return player ? player.units.filter((u) => u.type === UnitType.LAB && u.constructionLeft === 0).length : 1; }
+  labCostMultiplier(numLabs) { return Math.pow(5, numLabs); }
+  // Research is slow on purpose: a doctrine is a commitment, and the wait is what makes where you put
+  // the lab (and whether you can hold it) matter. Better doctrines take longer.
+  labResearchTicks(tier = 2) { return (120 + 60 * tier) * TICKS_PER_SECOND; }
+  // Everything tops out at level 3; one doctrine can push a single building type to 4.
+  maxUnitLevel(player, type) { return 3 + R.maxLevelBonus(player, type); }
   populationRequiredForLab() { return 3; }
   structureMinGap() { return 3; }
   labMinGapFromPopulation() { return 6; }
@@ -226,7 +246,12 @@ class Config {
   // ---- Mechs: super-tanky walking artillery, built at level-2+ factories ----
   mechFactoryLevelRequired() { return 2; }
   mechBaseHp(player, factoryLevel = 2) { return Math.floor(40000 * (1 + 0.5 * (factoryLevel - 2)) * R.mechHpMultiplier(player)); }
-  mechSpeed(player, onWater = false) { return 0.35 * (onWater ? 0.6 : 1) * R.mechSpeedMultiplier(player); }
+  // Ground matters: a mech rolls along friendly roads, wades through no-man's land and crawls once it
+  // is inside someone else's country. `ground` is 'own' | 'ally' | 'neutral' | 'enemy'.
+  mechSpeed(player, onWater = false, ground = 'neutral') {
+    const terrain = ground === 'own' || ground === 'ally' ? 1.2 : ground === 'enemy' ? 0.7 : 1;
+    return 0.35 * (onWater ? 0.6 : 1) * terrain * R.mechSpeedMultiplier(player);
+  }
   mechRange(player, factoryLevel = 2) { return 12 + 3 * (factoryLevel - 2) + R.mechRangeBonus(player); }
   mechCannonCooldown(player) { return Math.floor(60 * R.mechCooldownMultiplier(player)); }
   mechStompCooldown(player) { return Math.floor(20 * R.mechCooldownMultiplier(player)); }
@@ -237,9 +262,13 @@ class Config {
   mechPatrolRadius() { return 6; }
   // ---- Artillery Battery: the static answer to a mech parked on your border ----
   artilleryRange(player) { return 45 + R.artilleryRangeBonus(player); }
-  artilleryReload(player) { return Math.floor(40 * R.artilleryReloadMultiplier(player)); }
-  artilleryMechDamage(player) { return Math.floor(4500 * R.artilleryDamageMultiplier(player)); }
-  artilleryTroopKill(player) { return Math.floor(5000 * R.artilleryDamageMultiplier(player)); }
+  // A battery is a siege gun, not a machine gun: one shell every 45 seconds, but a direct hit takes a
+  // quarter of a mech or a tenth of a warship. Damage is a fraction of the target's own maximum, so it
+  // stays meaningful against high-level mechs.
+  artilleryReload(player) { return Math.floor(450 * R.artilleryReloadMultiplier(player)); }
+  artilleryMechDamageFraction(player) { return 0.25 * R.artilleryDamageMultiplier(player); }
+  artilleryShipDamageFraction(player) { return 0.1 * R.artilleryDamageMultiplier(player); }
+  artilleryTroopKill(player) { return Math.floor(20000 * R.artilleryDamageMultiplier(player)); }
   artilleryBlastRadius() { return 3; }
   // ---- Repair Yard: keeps mechs and walls alive near the front ----
   repairRange() { return 40; }
@@ -247,6 +276,20 @@ class Config {
   repairMechPercent() { return 0.02; }   // of max HP, per interval, per mech in range
   repairWallAmount() { return 2500; }    // HP per interval, spread over the damaged tiles it can reach
   repairWallTilesPerPass() { return 12; }
+  // ---- Airport / airships (see air.js for why these numbers are so unforgiving) ----
+  maxAirports() { return 1; }
+  airportSamExclusion() { return 70; }
+  airshipCap(player) { return 3 + R.airshipCapBonus(player); }
+  airshipCost(player, built) {
+    if (player && player.type === PlayerType.HUMAN && this.infiniteGold()) return 0;
+    return (1000000 + built * 750000) * R.airshipCostMultiplier(player) * this.buildDiscount(player);
+  }
+  airshipTroopShare(player) { return 0.05 * R.airshipCapacityMultiplier(player); }
+  airshipSpeed(player) { return 1.4 * R.airshipSpeedMultiplier(player); }
+  airshipRange(player) { return 260 + R.airshipRangeBonus(player); }
+  airshipHp() { return 1; }
+  interceptorRange(player) { return 60 + R.interceptorRangeBonus(player); }
+  interceptorKillChance(player) { return 0.45 * R.interceptorChanceMultiplier(player); }
   // A mech anchors the ground around it, like a mobile defense post.
   mechAuraRange() { return 30; }
   mechDefenseBonus() { return 3; }

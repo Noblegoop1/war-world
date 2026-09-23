@@ -156,7 +156,9 @@ module.exports = {
         }
       }
       // ---- movement: to the patrol point, then circle it ----
-      const speed = cfg.mechSpeed(p, m.onWater);
+      const groundOwner = this.ownerOf(here);
+      const ground = !groundOwner ? 'neutral' : groundOwner === p ? 'own' : p.isFriendly(groundOwner) ? 'ally' : 'enemy';
+      const speed = cfg.mechSpeed(p, m.onWater, ground);
       if (m.pts.length && m.idx < m.pts.length - 1) this.advanceAlong(m, speed);
       else if (this.tick >= m.wanderAt) {
         m.wanderAt = this.tick + this.rng.int(30, 60);
@@ -177,7 +179,10 @@ module.exports = {
       m.engaged = this.tick < m.engagedUntil;
       // ---- cannon ----
       if (this.tick >= m.cannonReady) {
-        const target = this.mechPickTarget(m);
+        // Standing on home soil with nothing actually threatening us, a mech holds fire rather than
+        // shelling the countryside. It still answers anything hostile that comes into range.
+        const passive = (m.mode === 'hold' || m.mode === 'roam') && (ground === 'own' || ground === 'ally');
+        const target = this.mechPickTarget(m, passive);
         if (target) {
           if (target.kind === 'ship') this.fireShell(p, m, target.obj, 'mechAA', { dmg: 700, speed: 4 });
           else this.fireShell(p, m, null, 'mech', { tx: target.x, ty: target.y, structTile: target.structTile ?? -1, dmg: cfg.mechShellDamage(p, m.level), troopKill: cfg.mechTroopKillPerShell(p, m.level), speed: 4, life: 80, level: m.level });
@@ -186,7 +191,7 @@ module.exports = {
         } else m.cannonReady = this.tick + 10;
       }
       // ---- stomp: clear hostile land underfoot ----
-      if (this.tick >= m.stompReady) {
+      if (this.tick >= m.stompReady && !((m.mode === 'hold' || m.mode === 'roam') && ground === 'own')) {
         const r = cfg.mechStompRadius(p);
         let hostileNear = false;
         const ix = Math.floor(m.x), iy = Math.floor(m.y);
@@ -207,7 +212,7 @@ module.exports = {
     }
   },
   // Target priority: hostile mech > hostile structure > hostile ship (amphibious) > densest hostile land patch.
-  mechPickTarget(m) {
+  mechPickTarget(m, passive = false) {
     const p = m.owner, r = m.range, r2 = r * r;
     let best = null, bd = Infinity;
     for (const o of this.mechs) { if (o === m || o.done || !this.hostile(p, o.owner)) continue; const d = (o.x - m.x) ** 2 + (o.y - m.y) ** 2; if (d <= r2 && d < bd) { bd = d; best = { x: o.x, y: o.y }; } }
@@ -224,6 +229,7 @@ module.exports = {
       if (ship) return { kind: 'ship', obj: ship };
     }
     // land: sample points in range, prefer tiles of the strongest hostile owner (bots last)
+    if (passive) return null;   // at home and unthreatened: don't shell the landscape
     let bestScore = 0;
     for (let i = 0; i < 18; i++) {
       const ang = this.rng.next() * Math.PI * 2, dist = 2 + this.rng.next() * (r - 2);

@@ -90,6 +90,8 @@ class Player {
     this.warships = [];
     this.subs = [];
     this.mechs = [];
+    this.airships = [];
+    this.airshipsBuilt = 0;
     this.ai = null;
     this.conqueredBy = null;
     this.nationSpawn = null;
@@ -132,6 +134,8 @@ const MIN_REGION_SIZE = 60;
 // Attack marker (the crossed swords + troop count). We keep the last FRONT_SAMPLE conquests and put the
 // marker on whichever of them sits nearest their centre, so it always lands on ground the attack is
 // actually taking. A plain average drifts into the middle of the defender when a front wraps around them.
+// Radiation decays one step every FALLOUT_DECAY_INTERVAL ticks (see addFallout / tickFallout).
+const FALLOUT_DECAY_INTERVAL = 10;
 const FRONT_SAMPLE = 48;
 const FRONT_SMOOTHING = 0.3;
 const FOCUS_MIN_DISTANCE = 8;
@@ -183,6 +187,8 @@ class Game {
     this.numLand = map.numLand;
     this.owner = new Uint16Array(this.width * this.height);
     this.fallout = new Uint8Array(this.width * this.height);
+    this.falloutTiles = new Set();
+    this.buildLandmasses();
     this.wallHp = new Uint16Array(this.width * this.height);
     this.numFallout = 0;
     this.rng = new Rng((map.seed ^ 0x5bd1e995) >>> 0);
@@ -199,6 +205,7 @@ class Game {
     this.warships = [];
     this.subs = [];
     this.mechs = [];
+    this.airships = [];
     this.shells = [];
     this.trains = [];
     this.rails = [];
@@ -303,13 +310,78 @@ class Game {
   }
   player(id) { return this.playersById.get(id) || null; }
 
+  // ---- landmasses ----------------------------------------------------------
+  // Every land tile gets the id of the continent/island it belongs to. Land connectivity never changes,
+  // so this is computed once. It is what tells an attack order "you can walk there" versus "you need a
+  // boat" - the old test was whether the player touched *any* neutral land anywhere, which sent boats
+  // across your own continent.
+  buildLandmasses() {
+    const n = this.width * this.height;
+    this.landmass = new Int32Array(n).fill(-1);
+    const queue = new Int32Array(n);
+    const b = [0, 0, 0, 0];
+    let id = 0;
+    for (let start = 0; start < n; start++) {
+      if (this.landmass[start] !== -1 || !this.isLand(start)) continue;
+      let head = 0, tail = 0;
+      queue[tail++] = start; this.landmass[start] = id;
+      while (head < tail) {
+        const t = queue[head++];
+        const m = this.neighbors4(t, b);   // 4-connected, matching how attacks actually spread
+        for (let k = 0; k < m; k++) {
+          const nb = b[k];
+          if (this.landmass[nb] !== -1 || !this.isLand(nb)) continue;
+          this.landmass[nb] = id;
+          queue[tail++] = nb;
+        }
+      }
+      id++;
+    }
+    this.numLandmasses = id;
+  }
+  // Does this player hold ground on the same landmass as `tile`? Sampled from their border, which is
+  // where an attack would start from anyway.
+  onSameLandmass(p, tile) {
+    if (!this.landmass) return false;
+    const want = this.landmass[tile];
+    if (want < 0) return false;
+    for (const t of p.border) if (this.landmass[t] === want) return true;
+    return false;
+  }
+
+  // ---- fallout -------------------------------------------------------------
+  // Radiation is a countdown, not a flag: a blast site is poisonous for a while and then usable again.
+  // Without the decay a nuked border stays a permanent no-man's land and the map slowly rots.
+  addFallout(tile, ticks) {
+    if (!this.fallout[tile]) this.numFallout++;
+    this.fallout[tile] = Math.max(this.fallout[tile], Math.min(255, Math.ceil(ticks / FALLOUT_DECAY_INTERVAL)));
+    this.falloutTiles.add(tile);
+    this.changedTiles.push(tile);
+  }
+  clearFallout(tile) {
+    if (!this.fallout[tile]) return;
+    this.fallout[tile] = 0;
+    this.numFallout--;
+    this.falloutTiles.delete(tile);
+  }
+  tickFallout() {
+    if (this.tick % FALLOUT_DECAY_INTERVAL !== 0 || !this.falloutTiles.size) return;
+    for (const t of this.falloutTiles) {
+      if (--this.fallout[t] > 0) continue;
+      this.fallout[t] = 0;
+      this.numFallout--;
+      this.falloutTiles.delete(t);
+      this.changedTiles.push(t);
+    }
+  }
+
   // ---- ownership -----------------------------------------------------------
   conquer(p, tile) {
     const prevSm = this.owner[tile];
     if (prevSm === p.smallID) return;
     if (prevSm !== 0) { const prev = this.playersBySmall[prevSm]; prev.tiles.delete(tile); prev.border.delete(tile); }
     this.owner[tile] = p.smallID;
-    if (this.fallout[tile]) { this.fallout[tile] = 0; this.numFallout--; }
+    if (this.fallout[tile]) this.clearFallout(tile);   // taking the ground cleans it up
     if (this.wallHp[tile]) this.clearWallTile(tile);
     p.tiles.add(tile);
     this.changedTiles.push(tile);
@@ -345,6 +417,7 @@ class Game {
     if (isBorder) p.border.add(tile); else p.border.delete(tile);
   }
   transferUnit(u, to) {
+    if (u.type === UnitType.LAB) this.onLabLost(u);   // captured labs stop working for their old owner
     const from = u.owner;
     if (from) from.units = from.units.filter((x) => x !== u);
     u.owner = to;
@@ -353,6 +426,7 @@ class Game {
     this.onStationOwnerChanged(u);
   }
   removeUnit(u) {
+    if (u.type === UnitType.LAB) this.onLabLost(u);
     if (u.owner) u.owner.units = u.owner.units.filter((x) => x !== u);
     this.units = this.units.filter((x) => x !== u);
     this.unitByTile.delete(u.tile);
@@ -369,7 +443,7 @@ class Game {
         const nb = b[k];
         if (!this.isLand(nb)) continue;
         const o = this.owner[nb];
-        if (o === 0) { if (!this.fallout[nb]) touchesNeutral = true; }
+        if (o === 0) touchesNeutral = true;   // includes irradiated ground: it is free land, just nasty to cross
         else if (o !== p.smallID) set.add(this.playersBySmall[o]);
       }
     }
@@ -461,6 +535,7 @@ class Game {
     this.tickSubs();
     this.tickMines();
     this.tickMechs();
+    this.tickAirships();
     this.tickShells();
     this.tickNukes();
     this.tickBombers();
@@ -468,6 +543,7 @@ class Game {
     this.tickDefensePosts();
     this.tickArtillery();
     this.tickRepairYards();
+    this.tickFallout();
     this.expireAllianceRequests();
     for (const p of this.players) if (p.ai && p.alive) p.ai.tick();
     this.checkDeaths();
@@ -490,6 +566,7 @@ class Game {
         for (const a of p.outgoingAttacks) a.done = true;
         for (const u of [...p.units]) this.removeUnit(u);
         for (const m of p.mechs) m.done = true;
+      for (const a of p.airships) a.done = true;
         for (const w of p.warships) w.done = true;
         for (const s of p.subs) s.done = true;
         this.events.push({ k: 'death', p: p.smallID, by: p.conqueredBy ? p.conqueredBy.smallID : 0 });
@@ -885,6 +962,7 @@ class Game {
       this.attackPower(p), this.economyPower(p), p.numWallTiles, p.mechs.length,
       p.warships.filter((w) => !w.done).length, p.subs.filter((s) => !s.done).length,
       Math.floor(this.troopsDeployed(p)),
+      p.airships.filter((a) => !a.done).length, p.airshipsBuilt || 0, cfg.maxResearchesPerPlayer(p),
     ]);
   }
   // Troops that have left home but still belong to this player: attacks in progress, boats in transit and
@@ -939,13 +1017,14 @@ class Game {
     if (this.tick % 5 === 0 || this.phase === 'over') pkt.stats = this.statsPacket();
     if (this.attacks.length) pkt.attacks = this.attacksPacket();   // every tick: the marker has to glide
     else if (this.tick % 5 === 0) pkt.attacks = [];
-    const mobile = this.boats.length || this.nukes.length || this.tradeShips.length || this.warships.length || this.subs.length || this.shells.length || this.trains.length || this.bombers.length;
+    const mobile = this.airships.length || this.boats.length || this.nukes.length || this.tradeShips.length || this.warships.length || this.subs.length || this.shells.length || this.trains.length || this.bombers.length;
     if (mobile || this.tick % 5 === 0) {
       pkt.boats = this.boatsPacket(); pkt.nukes = this.nukesPacket(); pkt.trade = this.tradePacket();
       pkt.shells = this.shellsPacket(); pkt.trains = this.trainsPacket(); pkt.bombers = this.bombersPacket();
       pkt.ships = true; // filled per client (submarine visibility)
     }
     if (this.mechs.length || this.tick % 20 === 0) pkt.mechs = this.mechsPacket();
+    if (this.airships.length || this.tick % 20 === 0) pkt.airships = this.airshipsPacket();
     if (this.unitsChanged || this.tick % 50 === 0) { pkt.units = this.unitsPacket(); this.unitsChanged = false; }
     if (this.railsChanged) { pkt.rails = this.railsPacket(); this.railsChanged = false; }
     if (this.phase === 'spawn') pkt.spawnLeft = this.spawnTicks - this.tick;
@@ -958,6 +1037,6 @@ class Game {
 }
 
 // ---- mix in the other systems ----
-Object.assign(Game.prototype, require('./units'), require('./navy'), require('./rails'), require('./mechs'), require('./nukes'));
+Object.assign(Game.prototype, require('./units'), require('./navy'), require('./rails'), require('./mechs'), require('./nukes'), require('./air'));
 
 module.exports = { Game, Player, PlayerType, UnitType, NukeType, newId };
