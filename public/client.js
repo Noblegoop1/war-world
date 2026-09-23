@@ -200,7 +200,9 @@ function handleMessage(m) {
       net.maps = m.maps || [];
       fillMapSelect();
       $('name-input').value = net.name;
-      $('menu-status').textContent = m.lan && m.lan.length ? `Friends on your network can join at http://${m.lan[0]}:${m.port}` : '';
+      // only worth saying when this page is served from the host's own machine, not from a hosting service
+      const local = /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(location.hostname);
+      $('menu-status').textContent = local && m.lan && m.lan.length ? `Friends on your network can join at http://${m.lan[0]}:${m.port}` : '';
       if (net.pendingJoin) { send({ t: 'join', code: net.pendingJoin }); net.pendingJoin = null; }
       else if (screen === 'menu') send({ t: 'list' });
       break;
