@@ -13,13 +13,63 @@
 //     for everybody else's missiles too, unless you research Airbase Network
 //   * Interceptor Screen shoots them down, so the counter exists and it is a doctrine, not a building
 //
+// Airships reach anywhere on the map. What decides how long a flight takes is the Airport's road network:
+// an Airport lays roads to your Cities in range (the way a Factory lays rail), and every City on those
+// roads is an airfield - an airship takes off from whichever airfield is closest to its target.
+//
 // Mixed into Game.prototype.
 const { UnitType, PlayerType } = require('./config');
 const { newId } = require('./ids');
+const { astar } = require('./path');
 const R = require('./research').effects;
+
+const AIRPORT_ROADS = 8;          // cities an Airport lays roads to
 
 module.exports = {
   airports(p) { return p.completedUnitsOf(UnitType.AIRPORT); },
+  // ---- roads ----
+  roadCost(t) { return this.isLand(t) && !this.wallHp[t] ? 1 : 0; },   // roads don't bridge the sea
+  roadConnect(u) {
+    const p = u.owner, range = this.config.airportRoadRange(p);
+    const queue = (a, b) => (this.roadQueue ||= []).push([a, b]);
+    if (u.type === UnitType.AIRPORT) {
+      const cities = p.units.filter((o) => o.type === UnitType.CITY && o.constructionLeft === 0 && this.dist(o.tile, u.tile) <= range)
+        .sort((a, b) => this.dist(a.tile, u.tile) - this.dist(b.tile, u.tile));
+      for (const c of cities.slice(0, AIRPORT_ROADS)) queue(u, c);
+    } else if (u.type === UnitType.CITY) {
+      for (const a of p.units) {
+        if (a.type !== UnitType.AIRPORT || a.constructionLeft > 0 || this.dist(a.tile, u.tile) > range) continue;
+        if (this.roads.filter((r) => r.a === a).length < AIRPORT_ROADS) queue(a, u);
+      }
+    }
+  },
+  layRoad(a, b) {
+    if (a.owner !== b.owner || this.roads.some((r) => r.a === a && r.b === b)) return false;
+    const range = this.config.airportRoadRange(a.owner);
+    const path = astar(this, [a.tile], b.tile, (t) => this.roadCost(t), { diag: true, maxIter: 40000 });
+    if (!path || path.length > range * 1.6) return false;
+    this.roads.push({ id: newId(), a, b, tiles: path });
+    this.roadsChanged = true;
+    return true;
+  },
+  tickRoads() {
+    if (!this.roadQueue || !this.roadQueue.length) return;
+    const [a, b] = this.roadQueue.shift();
+    if (this.units.includes(a) && this.units.includes(b)) this.layRoad(a, b);
+  },
+  // A road dies with either end, or when a city on it changes hands.
+  onRoadUnitChanged(u) {
+    if (u.type !== UnitType.AIRPORT && u.type !== UnitType.CITY) return;
+    const before = this.roads.length;
+    this.roads = this.roads.filter((r) => r.a !== u && r.b !== u);
+    if (this.roads.length !== before) this.roadsChanged = true;
+  },
+  // The Airport and every City on its roads.
+  airfields(p) {
+    const out = this.airports(p);
+    for (const r of this.roads) if (r.a.owner === p && r.b.owner === p && r.b.constructionLeft === 0) out.push(r.b);
+    return out;
+  },
   liveAirships(p) { return p.airships.filter((a) => !a.done); },
 
   // A SAM battery and an airport jam each other; neither can be built inside the other's exclusion ring.
@@ -39,6 +89,7 @@ module.exports = {
 
   canLaunchAirship(p, targetTile) {
     if (!p.alive) return { ok: false, reason: 'dead' };
+    if (this.unitDisabled('airport')) return { ok: false, reason: 'Airships are disabled in this game' };
     const ports = this.airports(p);
     if (!ports.length) return { ok: false, reason: 'Airships need an Airport' };
     if (!this.isLand(targetTile)) return { ok: false, reason: 'Airships drop troops on land' };
@@ -51,10 +102,8 @@ module.exports = {
     if (p.gold < cost) return { ok: false, reason: `Not enough gold (need ${Math.floor(cost).toLocaleString()})` };
     const troops = Math.floor(p.troops * this.config.airshipTroopShare(p));
     if (troops < 1) return { ok: false, reason: 'No troops to load' };
-    // nearest airport to the target does the flying
-    const from = ports.slice().sort((a, b) => this.dist(a.tile, targetTile) - this.dist(b.tile, targetTile))[0];
-    const range = this.config.airshipRange(p);
-    if (this.dist(from.tile, targetTile) > range) return { ok: false, reason: `Out of range (${range} tiles from your Airport)` };
+    // anywhere on the map: it takes off from the airfield (Airport, or a City on its roads) nearest the target
+    const from = this.airfields(p).sort((a, b) => this.dist(a.tile, targetTile) - this.dist(b.tile, targetTile))[0];
     return { ok: true, cost, from, troops };
   },
 

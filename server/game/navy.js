@@ -6,6 +6,9 @@ const { newId } = require('./ids');
 const { astar, resamplePath } = require('./path');
 const R = require('./research').effects;
 
+const SUB_MISSILE_CLIMB = 7;        // tiles the launch missile climbs before it splits
+const SUB_MISSILE_DROP_TICKS = 7;   // how long the three hang and drop before they burn
+
 // A ship that was hit within this many ticks does not regenerate at sea.
 const SHIP_COMBAT_REGEN_DELAY = 100;
 
@@ -203,6 +206,8 @@ module.exports = {
   tickShells() {
     if (!this.shells.length) return;
     for (const s of this.shells) {
+      if (s.drop > 0) { s.x += s.vx; s.y += s.vy; s.vy += 0.04; s.drop--; continue; }   // hanging after the split
+      if (s.accel) s.speed = Math.min(s.maxSpeed, s.speed * s.accel);
       if (s.target) { if (s.target.done || s.target.hp <= 0) s.target = null; else { s.tx = s.target.x; s.ty = s.target.y; } }
       const dx = s.tx - s.x, dy = s.ty - s.y, d = Math.hypot(dx, dy);
       if (d <= s.speed) { s.x = s.tx; s.y = s.ty; this.shellImpact(s); s.done = true; continue; }
@@ -241,6 +246,18 @@ module.exports = {
       return;
     }
     if (s.kind === 'bombard') { this.neutralizeArea(owner, s.tx, s.ty, 2, 400 + 150 * 4, 'bombard'); return; }
+    if (s.kind === 'subLaunch') {
+      // the split: three missiles fan out and drop, then each one burns hard for its target
+      const n = s.payload.length;
+      s.payload.forEach((p, i) => {
+        const side = n === 1 ? 0 : (i / (n - 1)) * 2 - 1;
+        const m = this.fireShell(owner, { x: s.x, y: s.y }, null, 'sub', { tx: p.tx, ty: p.ty, structTile: p.structTile, speed: 0.8, life: 160 });
+        m.vx = side * 0.35; m.vy = 0.1; m.drop = SUB_MISSILE_DROP_TICKS + i * 2;
+        m.accel = 1.28; m.maxSpeed = 9;
+      });
+      this.events.push({ k: 'subSplit', x: s.x, y: s.y, by: owner.smallID });
+      return;
+    }
     if (s.kind === 'sub') {
       const u = s.structTile >= 0 ? this.unitAt(s.structTile) : null;
       if (u && this.hostile(owner, u.owner)) { this.events.push({ k: 'structHit', p: u.owner.smallID, type: u.type, x: this.x(u.tile), y: this.y(u.tile) }); this.removeUnit(u); }
@@ -266,6 +283,21 @@ module.exports = {
       this.events.push({ k: 'shellHit', x: s.tx, y: s.ty });
       return;
     }
+    if (s.kind === 'mech' && s.swarm) {
+      // a mech shooting the swarm that is running at it
+      if (!s.swarm.done) s.swarm.troops *= 1 - this.config.swarmShellKill();
+      return;
+    }
+    if (s.kind === 'mech' && s.attackId) {
+      // a mech shell into an attacking army: it thins the attack itself, not the scenery
+      const a = this.attacks.find((x) => x.id === s.attackId && !x.done);
+      if (a) {
+        const k = this.config.mechAttackKill(owner, s.level);
+        a.troops = Math.max(0, a.troops - (a.troops * k.share + k.flat));
+        this.events.push({ k: 'mechHitAttack', x: s.tx, y: s.ty, by: owner.smallID, p: a.attacker.smallID });
+      }
+      return;
+    }
     if (s.kind === 'mech') {
       const u = s.structTile >= 0 ? this.unitAt(s.structTile) : null;
       if (u && this.hostile(owner, u.owner)) {
@@ -274,7 +306,7 @@ module.exports = {
       }
       const mechAt = this.mechs.find((m) => !m.done && this.hostile(owner, m.owner) && Math.hypot(m.x - s.tx, m.y - s.ty) <= this.config.mechShellBlastRadius() + 1);
       if (mechAt) mechAt.hp -= s.dmg;
-      this.neutralizeArea(owner, s.tx, s.ty, this.config.mechShellBlastRadius(), s.troopKill, 'mech');
+      this.mechBreach(owner, s.tx, s.ty, this.config.mechShellBlastRadius(), s.troopKill, this.config.mechWarBite(owner, s.level));
       return;
     }
   },
@@ -303,12 +335,14 @@ module.exports = {
     let best = null, bd = range * range;
     const consider = (s) => { if (s.done) return; if (!this.hostile(p, s.owner)) return; const d = (s.x - x) ** 2 + (s.y - y) ** 2; if (d < bd) { bd = d; best = s; } };
     for (const w of this.warships) consider(w);
+    for (const m of this.mechs) if (m.onWater) consider(m);    // a mech crossing the sea is fair game
     if (includeSubs) for (const s of this.subs) if (s.detected) consider(s);
     if (includeBoats) { for (const b of this.boats) consider(b); for (const t of this.tradeShips) consider(t); }
     return best;
   },
   damageShip(s, dmg, by) {
     if (s.done) return;
+    if (s.isMech) { s.hp -= dmg * (R.mechAmphibious(s.owner) ? 1 : 2); return; }   // a mech on a barge is a sitting duck
     if (s.troops !== undefined) { // transport boat: one hit sinks it, troops lost
       s.done = true; s.owner.boats = s.owner.boats.filter((b) => b !== s);
       this.events.push({ k: 'sunk', kind: 'boat', p: s.owner.smallID, by: by.smallID, x: s.x, y: s.y });
@@ -333,7 +367,7 @@ module.exports = {
   // ---- warships ---------------------------------------------------------------------
   canBuildWarship(p, tile) {
     if (!p.alive) return { ok: false, reason: 'dead' };
-    if (this.settings.disableBoats) return { ok: false, reason: 'Ships are disabled' };
+    if (this.unitDisabled('warship')) return { ok: false, reason: 'Warships are disabled in this game' };
     if (!this.isWater(tile)) return { ok: false, reason: 'Set the patrol point on water' };
     const ports = p.completedUnitsOf(UnitType.PORT);
     if (!ports.length) return { ok: false, reason: 'You need a Port to launch warships' };
@@ -430,6 +464,7 @@ module.exports = {
   // ---- submarines ---------------------------------------------------------------------
   canBuildSub(p, tile) {
     if (!p.alive) return { ok: false, reason: 'dead' };
+    if (this.unitDisabled('submarine')) return { ok: false, reason: 'Submarines are disabled in this game' };
     if (!p.researches.has('submarine_warfare')) return { ok: false, reason: 'Needs the Submarine Warfare research' };
     if (!this.isWater(tile)) return { ok: false, reason: 'Set the patrol point on water' };
     const ports = p.completedUnitsOf(UnitType.PORT);
@@ -472,19 +507,22 @@ module.exports = {
       const rr = cfg.submarineMissileRange();
       const targets = this.units.filter((u) => this.hostile(s.owner, u.owner) && u.owner.type !== PlayerType.BOT && u.type !== UnitType.MINE && this.distXY(this.x(u.tile), this.y(u.tile), s.x, s.y) <= rr)
         .sort((a, b) => this.distXY(this.x(a.tile), this.y(a.tile), s.x, s.y) - this.distXY(this.x(b.tile), this.y(b.tile), s.x, s.y)).slice(0, 3);
-      let fired = 0;
-      for (const u of targets) { this.fireShell(s.owner, s, null, 'sub', { tx: this.x(u.tile) + 0.5, ty: this.y(u.tile) + 0.5, structTile: u.tile, speed: 4, life: 60 }); fired++; }
-      if (fired < 3) {
-        for (let i = 0; i < 24 && fired < 3; i++) {
-          const gx = Math.floor(s.x) + this.rng.int(-rr, rr), gy = Math.floor(s.y) + this.rng.int(-rr, rr);
-          if (!this.valid(gx, gy)) continue;
-          const t = this.ref(gx, gy);
-          if (!this.isLand(t)) continue;
-          const o = this.ownerOf(t);
-          if (!o || !this.hostile(s.owner, o) || o.type === PlayerType.BOT) continue;
-          this.fireShell(s.owner, s, null, 'sub', { tx: gx + 0.5, ty: gy + 0.5, speed: 4, life: 60 });
-          fired++;
-        }
+      // One missile breaks the surface and climbs; at the top it splits into three that hang and drop for
+      // a moment, then each one lights up and races onto its own target (see shellImpact 'subLaunch').
+      const payload = targets.map((u) => ({ tx: this.x(u.tile) + 0.5, ty: this.y(u.tile) + 0.5, structTile: u.tile }));
+      for (let i = 0; i < 24 && payload.length < 3; i++) {
+        const gx = Math.floor(s.x) + this.rng.int(-rr, rr), gy = Math.floor(s.y) + this.rng.int(-rr, rr);
+        if (!this.valid(gx, gy)) continue;
+        const t = this.ref(gx, gy);
+        if (!this.isLand(t)) continue;
+        const o = this.ownerOf(t);
+        if (!o || !this.hostile(s.owner, o) || o.type === PlayerType.BOT) continue;
+        payload.push({ tx: gx + 0.5, ty: gy + 0.5, structTile: -1 });
+      }
+      const fired = payload.length;
+      if (fired) {
+        const carrier = this.fireShell(s.owner, s, null, 'subLaunch', { tx: s.x, ty: s.y - SUB_MISSILE_CLIMB, speed: 0.9, life: 40 });
+        carrier.payload = payload;
       }
       if (fired) { s.volleyReady = this.tick + cfg.submarineVolleyCooldown(); this.events.push({ k: 'volley', p: s.owner.smallID }); }
       else s.volleyReady = this.tick + 50;

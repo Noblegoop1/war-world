@@ -6,6 +6,11 @@ const { newId } = require('./ids');
 const { bezierArc, bezierPoint } = require('./path');
 const R = require('./research').effects;
 
+const CLUSTER_RIPPLE_TICKS = 2;   // cluster missiles leave the silo this far apart
+const CLUSTER_BLOOM_T = 0.62;     // how far along the arc the stream starts to open up
+const MIRV_SPLIT_T = 0.5;         // the bus separates at the top of its arc
+const MIRV_RELEASE_TICKS = 3;     // gap between warheads leaving the bus
+
 module.exports = {
   readySilos(p) { return p.units.filter((u) => u.type === UnitType.SILO && u.constructionLeft === 0 && u.cooldown === 0); },
   canLaunchNuke(p, type, tile) {
@@ -13,7 +18,9 @@ module.exports = {
     if (this.settings.disableNukes) return { ok: false, reason: 'Nukes are disabled' };
     if (!Object.values(NukeType).includes(type)) return { ok: false, reason: 'bad type' };
     if (type === NukeType.CLUSTER && !R.clusterMunitions(p)) return { ok: false, reason: 'Cluster Strikes need the Cluster Munitions research' };
-    if (!this.isLand(tile)) return { ok: false, reason: 'Target must be land' };
+    if (this.unitDisabled(type === NukeType.HYDROGEN ? 'hydrogen' : 'atom')) return { ok: false, reason: 'That bomb is disabled in this game' };
+    // Water Nukes (lobby option): the sea is a legal target too - that is how you hit a fleet
+    if (!this.isLand(tile) && !(this.settings.waterNukes && this.isWater(tile))) return { ok: false, reason: this.settings.waterNukes ? 'Target must be land or sea' : 'Target must be land' };
     const cost = this.config.nukeCost(type, p);
     if (p.gold < cost) return { ok: false, reason: `Not enough gold (need ${Math.floor(cost).toLocaleString()})` };
     const silos = this.readySilos(p);
@@ -34,14 +41,19 @@ module.exports = {
     if (type === NukeType.CLUSTER) {
       // Eight separate missiles, each its own target for a SAM. That is the whole idea: a SAM kills one
       // missile per reload, so a volley gets most of its load through a defence that stops any single bomb.
+      // They are ripple-fired a moment apart and ride one shared arc as a stream, then bloom apart over
+      // the target like a flower opening - each one peels off to its own impact point.
       const cx = this.x(tile), cy = this.y(tile), spread = this.config.clusterSpread();
+      const shared = bezierArc(c.from.x + 0.5, c.from.y + 0.5, cx + 0.5, cy + 0.5);
       for (let i = 0; i < this.config.clusterCount(); i++) {
         const ang = (i / this.config.clusterCount()) * Math.PI * 2 + this.rng.next() * 0.6;
         const d = i === 0 ? 0 : this.rng.int(4, spread);
         const tx = Math.max(0, Math.min(this.width - 1, Math.round(cx + Math.cos(ang) * d)));
         const ty = Math.max(0, Math.min(this.height - 1, Math.round(cy + Math.sin(ang) * d)));
         const b = this.spawnNuke(p, 'bomblet', c.from.x, c.from.y, tx, ty, this.ref(tx, ty));
-        b.arc = bezierArc(c.from.x + 0.5, c.from.y + 0.5, tx + 0.5, ty + 0.5, 25 + i * 3);  // fan the arcs out
+        b.arc = shared;
+        b.bloom = { dx: tx - cx, dy: ty - cy };
+        b.wait = i * CLUSTER_RIPPLE_TICKS;
       }
     } else this.spawnNuke(p, type, c.from.x, c.from.y, this.x(tile), this.y(tile), tile);
     this.events.push({ k: 'nuke', type, by: p.smallID, tile, target: this.owner[tile] });
@@ -57,7 +69,10 @@ module.exports = {
     if (!this.nukes.length) return;
     for (const nk of this.nukes) {
       if (nk.done) continue;
-      const speed = this.config.nukeSpeed(nk.owner);
+      if (nk.wait > 0) { nk.wait--; continue; }       // still in the tube (ripple fire / staggered release)
+      // MIRV warheads start slow as they separate from the bus and pick up speed as they fall
+      let speed = this.config.nukeSpeed(nk.owner);
+      if (nk.type === 'warhead') { nk.fall = (nk.fall || 0) + 1; speed = Math.min(speed * 1.6, 1.2 + nk.fall * 0.45); }
       // SAM interception (only real nukes; MIRV warheads too)
       let intercepted = false;
       for (const u of this.units) {
@@ -78,11 +93,34 @@ module.exports = {
       }
       if (intercepted) { nk.done = true; continue; }
       nk.t += speed / nk.arc.length;
+      // MIRV: the bus climbs to the top of its arc, then releases its warheads one after another
+      if (nk.type === NukeType.HYDROGEN && nk.t >= MIRV_SPLIT_T && nk.owner.researches.has('mirv') && !this.unitDisabled('mirv')) { nk.done = true; this.splitMirv(nk); continue; }
       if (nk.t >= 1) { nk.x = nk.tx + 0.5; nk.y = nk.ty + 0.5; nk.done = true; this.detonate(nk); continue; }
       const pt = bezierPoint(nk.arc, nk.t);
+      if (nk.bloom) {
+        // cluster bomblets share the arc until the last stretch, then peel away to their own targets
+        const k = Math.max(0, Math.min(1, (nk.t - CLUSTER_BLOOM_T) / (1 - CLUSTER_BLOOM_T)));
+        const e = k * k * (3 - 2 * k);
+        pt.x += nk.bloom.dx * e; pt.y += nk.bloom.dy * e;
+      }
       nk.x = pt.x; nk.y = pt.y;
     }
     this.nukes = this.nukes.filter((n) => !n.done);
+  },
+  // The MIRV bus separates at the top of its arc. Warheads leave one by one (like OpenFront's staggered
+  // release), each on its own short fall to a point around the target; every one is a separate target for
+  // a SAM, and a bus shot down before it separates takes all of them with it.
+  splitMirv(bus) {
+    const cx = bus.tx, cy = bus.ty, n = this.config.mirvWarheads();
+    const bx = bus.x, by = bus.y;
+    for (let i = 0; i < n; i++) {
+      const ang = (i / n) * Math.PI * 2 + this.rng.next() * 0.8, d = i === 0 ? this.rng.int(0, 6) : this.rng.int(12, 45);
+      const wx = Math.max(0, Math.min(this.width - 1, Math.round(cx + Math.cos(ang) * d))), wy = Math.max(0, Math.min(this.height - 1, Math.round(cy + Math.sin(ang) * d)));
+      const w = { id: newId(), type: 'warhead', owner: bus.owner, x: bx, y: by, sx: bx - 0.5, sy: by - 0.5, tx: wx, ty: wy, target: this.ref(wx, wy), t: 0, done: false,
+        arc: bezierArc(bx, by, wx + 0.5, wy + 0.5, 6), wait: i * MIRV_RELEASE_TICKS + this.rng.int(0, 2) };
+      this.nukes.push(w);
+    }
+    this.events.push({ k: 'mirvSplit', x: bx, y: by, by: bus.owner.smallID });
   },
   // OpenFront blast: BFS from ground zero; a tile is destroyed inside `inner`, or inside `outer` with 50% chance
   // (and only if connected through destroyed tiles, so no isolated pixels).
@@ -104,21 +142,10 @@ module.exports = {
     }
     return out;
   },
-  detonate(nk, isWarhead = false) {
+  detonate(nk) {
     const { inner, outer } = nk.type === 'warhead' ? { inner: 12, outer: 18 } : this.config.nukeMagnitude(nk.type, nk.owner);
     const small = nk.type === 'bomblet';
     const cx = nk.tx, cy = nk.ty;
-    // MIRV: a hydrogen bomb splits into 5 atom-sized warheads instead of one big blast
-    if (nk.type === NukeType.HYDROGEN && nk.owner.researches.has('mirv') && !isWarhead) {
-      for (let i = 0; i < 5; i++) {
-        const ang = this.rng.next() * Math.PI * 2, d = this.rng.int(6, 45);
-        const wx = Math.max(0, Math.min(this.width - 1, Math.round(cx + Math.cos(ang) * d))), wy = Math.max(0, Math.min(this.height - 1, Math.round(cy + Math.sin(ang) * d)));
-        const w = this.spawnNuke(nk.owner, 'warhead', cx, cy, wx, wy, this.ref(wx, wy));
-        w.arc = bezierArc(cx + 0.5, cy + 0.5, wx + 0.5, wy + 0.5, 12);
-      }
-      this.events.push({ k: 'mirvSplit', x: cx, y: cy, by: nk.owner.smallID });
-      return;
-    }
     const hitTiles = new Map(), before = new Map();
     const hardenedSpared = new Set();
     for (const t of this.blastTiles(cx, cy, inner, outer)) {

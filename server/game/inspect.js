@@ -101,7 +101,8 @@ module.exports = {
       case UnitType.AIRPORT:
         rows.push(['Airships', `${this.liveAirships(p).length} / ${cfg.airshipCap(p)} in the air`]);
         rows.push(['Carries', `${pct(cfg.airshipTroopShare(p))} of your troops`]);
-        rows.push(['Range', `${cfg.airshipRange(p)} tiles`]);
+        rows.push(['Range', 'anywhere on the map']);
+        rows.push(['Roads', `${this.roads.filter((r) => r.a === u).length} Cities linked (within ${cfg.airportRoadRange(p)} tiles) - airships take off from whichever is nearest the target`]);
         rows.push(['Next airship', num(cfg.airshipCost(p, p.airshipsBuilt || 0))]);
         rows.push(['SAMs nearby', R.samNearAirport(p) ? 'allowed (Airbase Network)' : `not within ${cfg.airportSamExclusion()} tiles`]);
         break;
@@ -119,17 +120,22 @@ module.exports = {
     const perSec = (t) => (cfg.mechSpeed(p, false, t) * TICKS_PER_SECOND).toFixed(1);
     rows.push(['Owner', p.name]);
     rows.push(['Health', `${num(Math.max(0, m.hp))} / ${num(m.maxHp)}`, m.hp < m.maxHp * 0.4 ? 'bad' : undefined]);
-    rows.push(['Shell', `${num(cfg.mechShellDamage(p, m.level))} dmg, kills ${num(cfg.mechTroopKillPerShell(p, m.level))} troops`]);
+    const k = cfg.mechAttackKill(p, m.level);
+    rows.push(['Vs attacking armies', `each shell kills ${pct(k.share)} of the attack + ${num(k.flat)}, every ${sec(Math.ceil(cfg.mechCannonCooldown(p) / cfg.mechSuppressFactor()))}`, 'good']);
+    rows.push(['Shell', `${num(cfg.mechShellDamage(p, m.level))} dmg to mechs; against a nation you are attacking also ${pct(cfg.mechWarBite(p, m.level))} of its army`]);
     rows.push(['Range', `${m.range} tiles`]);
     rows.push(['Cannon reload', sec(cfg.mechCannonCooldown(p))]);
     rows.push(['Stomp', `radius ${cfg.mechStompRadius(p)}, every ${sec(cfg.mechStompCooldown(p))}`]);
     rows.push(['Speed', `${perSec('own')} home · ${perSec('neutral')} open · ${perSec('enemy')} enemy tiles/s`]);
-    rows.push(['Holds ground', `${cfg.mechAuraRange()} tiles: attackers lose ×${cfg.mechDefenseBonus()} troops, ×${cfg.mechSpeedPenalty()} slower`, 'good']);
-    if (R.mechCrossesWater(p)) rows.push(['Water', 'can cross']);
+    rows.push(['Holds ground', `nothing within ${cfg.mechHoldRadius()} tiles can be taken while it stands; within ${cfg.mechAuraRange()} tiles attackers lose ×${cfg.mechDefenseBonus()} troops and are ×${cfg.mechSpeedPenalty()} slower`, 'good']);
+    rows.push(['Spearhead', `your attacks within ${cfg.mechSpearheadRange()} tiles: ×${cfg.mechSpearheadSpeed()} faster, ×${cfg.mechSpearheadLoss()} losses; its stomps take the ground for you`, 'good']);
+    rows.push(['Swarm to kill', `about ${num(Math.ceil(Math.max(0, m.hp) / cfg.swarmDamagePerTroop()))} troops`]);
+    rows.push(['Water', R.mechCrossesWater(p) ? 'crosses freely' : `crosses on a barge (${(cfg.mechSpeed(p, true) * TICKS_PER_SECOND).toFixed(1)} tiles/s, can't fire, warships can hit it)`]);
     if (R.mechAmphibious(p)) rows.push(['Vs ships', `${num(cfg.mechShipDamage(p))} per shell, spots subs in ${cfg.mechSubDetectRange()} tiles`, 'good']);
     if (R.mechAntiAir(p)) rows.push(['Anti-air', 'shoots down airships in range', 'good']);
     if (viewer === p || viewer.isFriendly(p)) {
-      rows.push(['Orders', m.refit ? `refitting (${m.refit.phase === 'work' ? sec(m.refit.until - this.tick) + ' left' : 'heading home'})` : m.mode]);
+      const label = { defend: 'Guard', hold: 'Hold position', roam: 'Roam border', assault: 'Assault' }[m.mode] || m.mode;
+      rows.push(['Orders', m.refit ? `refitting (${m.refit.phase === 'work' ? sec(m.refit.until - this.tick) + ' left' : 'heading home'})` : label + (m.mode === 'assault' && this.playersBySmall[m.orderTarget] ? ' ' + this.playersBySmall[m.orderTarget].name : '')]);
       const yard = this.refitYard(p, 'mech', m.x, m.y);
       if (yard && yard.level > m.level && !m.refit) rows.push(['Refit available', `to level ${yard.level}`, 'good']);
     }

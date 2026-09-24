@@ -9,6 +9,7 @@ const UnitType = { CITY: 'city', PORT: 'port', DEFENSE_POST: 'defense', SILO: 's
 const STRUCTURE_TYPES = ['city', 'port', 'defense', 'silo', 'sam', 'lab', 'factory', 'mine', 'artillery', 'repair', 'airport'];
 const { effects: R } = require('./research');
 // Structures that count as "population" (a nation's civilian centers). Labs & walls can't be built near these.
+const MECH_BARGE_SPEED = 0.5;              // a mech without a water doctrine, crossing on a barge
 const POPULATION_TYPES = ['city'];
 const NukeType = { ATOM: 'atom', HYDROGEN: 'hydrogen', CLUSTER: 'cluster' };
 const Difficulty = { EASY: 'easy', MEDIUM: 'medium', HARD: 'hard', IMPOSSIBLE: 'impossible' };
@@ -39,7 +40,22 @@ const DEFAULT_SETTINGS = {
   instantBuild: false,
   startingGold: 0,
   percentToWin: 80,
+  // ---- the options page ----
+  mode: 'ffa',                 // ffa | teams  (zombie is coming next)
+  teams: '2',                  // '2'..'7' | 'duos' | 'trios' | 'quads' | 'hvn' (humans vs nations)
+  nationsDefault: false,       // use every nation the map defines
+  randomSpawn: false,
+  waterNukes: false,
+  doomsdayClock: false,
+  maxTimerMinutes: 0,          // game length; 0 = no limit
+  goldMultiplier: 1,
+  allianceMinutes: 0,          // alliances expire after this long; 0 = never
+  overtimeMinutes: 0,          // after this long the land needed to win starts dropping; 0 = never
+  disabledUnits: [],
 };
+// Everything the host can switch off on the options page (keys match the build keys).
+const DISABLEABLE_UNITS = ['city', 'defense', 'port', 'warship', 'boat', 'silo', 'sam', 'atom', 'hydrogen', 'mirv', 'factory', 'lab', 'mech', 'wall', 'artillery', 'repair', 'airport', 'submarine'];
+const TEAM_SPECS = ['2', '3', '4', '5', '6', '7', 'duos', 'trios', 'quads', 'hvn'];
 
 function sanitizeSettings(input, isValidMapId) {
   const s = { ...DEFAULT_SETTINGS };
@@ -63,6 +79,32 @@ function sanitizeSettings(input, isValidMapId) {
   s.instantBuild = !!input.instantBuild;
   s.startingGold = Math.round(num(input.startingGold, 0, 1e9, 0));
   s.percentToWin = Math.round(num(input.percentToWin, 30, 100, 80));
+  // ---- the options page (numbers arrive as a checkbox + a value, OpenFront style) ----
+  const on = (k) => input[k] === true || input[k] === 'true' || input[k] === 'on';
+  s.mode = input.mode === 'teams' ? 'teams' : 'ffa';
+  s.teams = TEAM_SPECS.includes(String(input.teams)) ? String(input.teams) : '2';
+  s.nationsDefault = !!input.nationsDefault;
+  s.randomSpawn = !!input.randomSpawn;
+  s.waterNukes = !!input.waterNukes;
+  s.doomsdayClock = !!input.doomsdayClock;
+  s.maxTimerOn = on('maxTimerOn'); s.maxTimer = Math.round(num(input.maxTimer, 1, 120, 30));
+  s.maxTimerMinutes = s.maxTimerOn ? s.maxTimer : 0;
+  s.goldMultOn = on('goldMultOn'); s.goldMult = num(input.goldMult, 0.1, 100, 2);
+  s.goldMultiplier = s.goldMultOn ? s.goldMult : 1;
+  s.startingGoldOn = on('startingGoldOn'); s.startingGoldM = num(input.startingGoldM, 0, 1000, 5);
+  if (s.startingGoldOn) s.startingGold = Math.round(s.startingGoldM * 1e6);
+  s.allianceOn = on('allianceOn'); s.allianceMin = Math.round(num(input.allianceMin, 1, 60, 5));
+  s.allianceMinutes = s.allianceOn ? s.allianceMin : 0;
+  s.overtimeOn = on('overtimeOn'); s.overtimeMin = Math.round(num(input.overtimeMin, 1, 180, 45));
+  s.overtimeMinutes = s.overtimeOn ? s.overtimeMin : 0;
+  // disabled units: either a list, or one unit_<key> flag per chip (checked = allowed)
+  const list = Array.isArray(input.disabledUnits) ? input.disabledUnits.map(String) : DISABLEABLE_UNITS.filter((k) => input['unit_' + k] === false || input['unit_' + k] === 'false');
+  s.disabledUnits = DISABLEABLE_UNITS.filter((k) => list.includes(k));
+  if (input.disableNukes && !Array.isArray(input.disabledUnits)) for (const k of ['atom', 'hydrogen', 'mirv']) if (!s.disabledUnits.includes(k)) s.disabledUnits.push(k);
+  if (input.disableBoats && !Array.isArray(input.disabledUnits) && !s.disabledUnits.includes('boat')) s.disabledUnits.push('boat');
+  for (const k of DISABLEABLE_UNITS) s['unit_' + k] = !s.disabledUnits.includes(k);
+  s.disableNukes = s.disabledUnits.includes('atom') && s.disabledUnits.includes('hydrogen');
+  s.disableBoats = s.disabledUnits.includes('boat');
   return s;
 }
 
@@ -143,6 +185,7 @@ class Config {
   // Cluster Strike: many small missiles instead of one big one, so SAMs (one kill per reload) saturate.
   clusterCount() { return 8; }
   clusterSpread() { return 20; }
+  mirvWarheads() { return 5; }
   nukeMagnitude(type, player) {
     if (type === NukeType.HYDROGEN) return { inner: 80, outer: 100 };
     if (type === 'bomblet') return { inner: 3, outer: 6 };
@@ -268,12 +311,39 @@ class Config {
   // ---- Mechs: super-tanky walking artillery, built at level-2+ factories ----
   mechFactoryLevelRequired() { return 2; }
   mechBaseHp(player, factoryLevel = 2) { return Math.floor(40000 * (1 + 0.5 * (factoryLevel - 2)) * R.mechHpMultiplier(player)); }
-  // Ground matters: a mech rolls along friendly roads, wades through no-man's land and crawls once it
-  // is inside someone else's country. `ground` is 'own' | 'ally' | 'neutral' | 'enemy'.
+  // Ground matters: on its own roads a mech drives - fast enough to reach an attack anywhere at home
+  // within seconds - it wades through no-man's land and crawls once it is inside someone else's country.
+  // Without a water doctrine it crosses the sea on a slow barge. `ground` is 'own' | 'ally' | 'neutral' | 'enemy'.
   mechSpeed(player, onWater = false, ground = 'neutral') {
-    const terrain = ground === 'own' || ground === 'ally' ? 1.2 : ground === 'enemy' ? 0.7 : 1;
-    return 0.35 * (onWater ? 0.6 : 1) * terrain * R.mechSpeedMultiplier(player);
+    let base;
+    if (onWater) base = R.mechCrossesWater(player) ? 0.35 : MECH_BARGE_SPEED;
+    else base = ground === 'own' ? 1.2 : ground === 'ally' ? 0.8 : ground === 'enemy' ? 0.3 : 0.45;
+    return base * R.mechSpeedMultiplier(player);
   }
+  // A mech shell into an attacking army: a share of that attack plus a flat bite, by factory level.
+  // Against troops a mech fires suppressive rounds, three times as often as its normal cannon.
+  mechAttackKill(player, factoryLevel = 2) {
+    const m = (1 + 0.3 * (factoryLevel - 2)) * R.mechDamageMultiplier(player);
+    return { share: 0.03 * m, flat: 5000 * m };
+  }
+  // Spearhead: your own attacks within this range of your mech take ground faster and lose fewer troops.
+  mechSuppressFactor() { return 3; }
+  // Hold zone: the owner's ground this close to a mech can't be taken while it stands. Each attempt at it
+  // chips the mech (a big army chips harder) and costs the attacker troops.
+  mechHoldRadius() { return 6; }
+  mechHoldChip(attackTroops) { return 15 + attackTroops * 0.00001; }
+  mechHoldBleed() { return 400; }
+  mechSpearheadRange() { return 40; }
+  // Share of a nation's army each mech shell takes while the mech's owner is attacking that nation
+  // (a stomp takes a quarter of this).
+  mechWarBite(player, factoryLevel = 2) { return 0.02 * (1 + 0.3 * (factoryLevel - 2)) * R.mechDamageMultiplier(player); }
+  mechSpearheadSpeed() { return 2; }
+  mechSpearheadLoss() { return 0.5; }
+  // Swarms: troops sent at an enemy mech. Every troop that reaches it takes this much off its health.
+  swarmSpeed() { return 1.5; }
+  swarmDamagePerTroop() { return 0.03; }
+  swarmRange() { return 120; }            // how far from your own land a swarm will run
+  swarmShellKill() { return 0.15; }       // share of a swarm a mech shell kills
   mechRange(player, factoryLevel = 2) { return 12 + 3 * (factoryLevel - 2) + R.mechRangeBonus(player); }
   mechCannonCooldown(player) { return Math.floor(60 * R.mechCooldownMultiplier(player)); }
   mechStompCooldown(player) { return Math.floor(20 * R.mechCooldownMultiplier(player)); }
@@ -322,7 +392,9 @@ class Config {
   }
   airshipTroopShare(player) { return 0.05 * R.airshipCapacityMultiplier(player); }
   airshipSpeed(player) { return 1.4 * R.airshipSpeedMultiplier(player); }
-  airshipRange(player) { return 260 + R.airshipRangeBonus(player); }
+  // Airships reach anywhere; the Airport's road network (and Strategic Airlift's longer roads) decides
+  // where they take off from.
+  airportRoadRange(player) { return 110 * R.airportRoadMultiplier(player); }
   airshipHp() { return 1; }
   seadRadius() { return 15; }
   interceptorRange(player) { return 60 + R.interceptorRangeBonus(player); }
@@ -433,6 +505,8 @@ class Config {
     }
     // A mech nearby digs in the ground it stands on, the same way a defense post does.
     if (defender !== null && input.defenderHasMech) { mag *= this.mechDefenseBonus(); tileCost *= this.mechSpeedPenalty(); }
+    // ...and on the attack it is the spearhead: troops pushing past their own mech break through.
+    if (defender !== null && input.attackerHasMech) { mag *= this.mechSpearheadLoss(); tileCost /= this.mechSpearheadSpeed(); }
     if (input.falloutRatio !== null) { const f = this.falloutDefenseModifier(input.falloutRatio); mag *= f; tileCost *= f; }
     if (defender === null) {
       const tickBudget = input.borderSize * 2;
@@ -480,5 +554,5 @@ const { RESEARCH, RESEARCH_BY_ID } = require('./research');
 
 module.exports = {
   TerrainType, PlayerType, UnitType, STRUCTURE_TYPES, POPULATION_TYPES, NukeType, Difficulty, TICKS_PER_SECOND, DEFAULT_SETTINGS, sanitizeSettings,
-  Config, within, HUMAN_COLORS, NATION_COLORS, BOT_COLORS, RESEARCH, RESEARCH_BY_ID,
+  Config, within, HUMAN_COLORS, NATION_COLORS, BOT_COLORS, RESEARCH, RESEARCH_BY_ID, DISABLEABLE_UNITS, TEAM_SPECS,
 };

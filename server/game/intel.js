@@ -62,6 +62,7 @@ const WORDS = {
   enemy_of_enemy: 'fights someone I hate', traitor: 'a known traitor', busy: 'fighting on another front',
   overextended: 'attacking on several fronts at once', danger: 'a real threat to me', easy_prey: 'weak, next door and unprotected',
   offline: 'its player has disconnected',
+  outgrown: 'an ally I have outgrown - far weaker than me', rushing: 'I am going all-in on them',
 };
 
 module.exports = {

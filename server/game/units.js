@@ -38,6 +38,7 @@ module.exports = {
   canBuild(p, type, tile) {
     if (!p.alive) return { ok: false, reason: 'dead' };
     if (!STRUCTURE_TYPES.includes(type)) return { ok: false, reason: 'bad type' };
+    if (this.unitDisabled(type)) return { ok: false, reason: 'That is disabled in this game' };
     if (type === UnitType.MINE) {
       if (!p.researches.has('naval_mines')) return { ok: false, reason: 'Needs the Naval Mines research' };
       if (!this.isWater(tile)) return { ok: false, reason: 'Mines go in the water' };
@@ -109,6 +110,7 @@ module.exports = {
   },
   onUnitCompleted(u) {
     if (u.type === UnitType.FACTORY || u.type === UnitType.CITY || u.type === UnitType.PORT || u.type === UnitType.LAB) this.railConnect(u);
+    if (u.type === UnitType.AIRPORT || u.type === UnitType.CITY) this.roadConnect(u);
   },
   // Defensive Position: garrison 10% of your troops into a post to make it hit harder.
   reinforcePost(p, tile) {
@@ -325,6 +327,7 @@ module.exports = {
   },
   buildWall(p, waypoints) {
     if (!p.alive) return { ok: false, reason: 'dead' };
+    if (this.unitDisabled('wall')) return { ok: false, reason: 'Walls are disabled in this game' };
     const plan = this.planWall(p, waypoints);
     if (!plan.ok) return plan;
     if (p.gold < plan.cost) return { ok: false, reason: `Not enough gold (need ${plan.cost.toLocaleString()})` };
@@ -373,7 +376,9 @@ module.exports = {
   offerResearch(p, lab) {
     if (p.research || p.pendingChoices || p.researchCount() >= this.config.maxResearchesPerPlayer(p)) return false;
     const taken = p.researches;
-    const pool = RESEARCH.filter((r) => !taken.has(r.id) && !(r.id === 'nuclear_subs' && !taken.has('submarine_warfare')));
+    // doctrines for things switched off in the lobby are never offered
+    const off = { mirv: 'mirv', submarine_warfare: 'submarine', nuclear_subs: 'submarine', strategic_airlift: 'airport', airbase_network: 'airport', airborne_doctrine: 'airport', cluster_munitions: 'atom', tactical_nukes: 'atom' };
+    const pool = RESEARCH.filter((r) => !taken.has(r.id) && !(r.id === 'nuclear_subs' && !taken.has('submarine_warfare')) && !(off[r.id] && this.unitDisabled(off[r.id])));
     if (pool.length < 3) return false;
     const choices = [];
     const bag = [...pool];

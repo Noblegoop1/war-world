@@ -74,6 +74,16 @@ colour** in pure grey **RGB 180,180,180**, the **darker border colour** in **RGB
 * Declare war / Make peace radial icons (currently reuse the sword and handshake icons; the nation card
   uses ⚔ and 🕊 emoji) — `public/assets/icons/WarIcon.svg`, `PeaceIcon.svg`, white silhouettes 24×24.
 * "Hide / Show doctrines" button on the research picker is plain text; an eye / eye-off icon would suit it.
+* Options page: difficulty cards use the ☠ text glyph (red, with a CSS glow for Impossible) instead of real
+  skull / flaming-skull icons — `public/assets/icons/SkullIcon.svg`, `SkullFireIcon.svg`. The map cards
+  are name-only; a small thumbnail per map (`public/assets/maps/<id>.png`, ~240×120) would match OpenFront.
+  Mode cards could use icons for Free for All / Teams / Zombie.
+* Missile trails are procedural lines (grey smoke for single bombs, orange sparks for cluster bomblets,
+  white-hot streaks for MIRV warheads, cyan for submarine missiles). Real exhaust/smoke sprites and a
+  MIRV separation flash would sell it.
+* Swarms (troops running at a mech) are drawn as a cluster of coloured dots with a count; mech barges as
+  a brown hull ellipse under the mech; airport roads as grey lines with a dashed centre line and the
+  runway as a dark strip. All placeholders.
 * Nation card background texture.
 * Game logo for the menu (currently plain text "WAR WORLD").
 * Favicon (`public/favicon.ico`).

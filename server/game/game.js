@@ -93,6 +93,9 @@ class Player {
     this.spawnTick = 0;
     this.deathTick = 0;
     this.allies = new Set();
+    this.team = 0;                 // team games: the team this player is dealt into
+    this.allianceSince = new Map(); // id -> tick the alliance was made (for alliances that expire)
+    this.doomedAt = 0;             // doomsday clock: tick this player's side fell under the bar
     this.traitorUntil = 0;
     this.relations = new Map();
     this.disconnected = false;
@@ -126,7 +129,7 @@ class Player {
   get alive() { return this.spawned && this.tiles.size > 0; }
   researchCount() { return this.researches.size + (this.research ? 1 : 0); }
   isTraitor() { return this.game.tick < this.traitorUntil; }
-  isFriendly(other) { return other === this || this.allies.has(other.id); }
+  isFriendly(other) { return other === this || this.allies.has(other.id) || (this.team !== 0 && this.team === other.team); }
   unitsOf(type) { return this.units.filter((u) => u.type === type); }
   completedUnitsOf(type) { return this.units.filter((u) => u.type === type && u.constructionLeft === 0); }
   unitLevels(type) { return this.completedUnitsOf(type).reduce((s, u) => s + u.level, 0); }
@@ -135,6 +138,8 @@ class Player {
   removeTroops(n) { const r = Math.min(this.troops, Math.max(0, Math.floor(n))); this.troops -= r; return r; }
   // Every payout names its source so the HUD can show where the money comes from.
   addGold(n, src = 'other') {
+    // the lobby's gold multiplier scales everything earned (not conquest spoils or gifts)
+    if (src === 'passive' || src === 'trade' || src === 'train' || src === 'plunder') n *= this.game.settings.goldMultiplier || 1;
     this.gold += n; this.goldEarned += n;
     if (n > 0) this.incomeBucket[src] = (this.incomeBucket[src] || 0) + n;
   }
@@ -229,12 +234,15 @@ class Game {
     this.warships = [];
     this.subs = [];
     this.mechs = [];
+    this.swarms = [];
     this.airships = [];
     this.shells = [];
     this.trains = [];
     this.rails = [];
     this.railAdj = new Map();
     this.railsChanged = true;
+    this.roads = [];
+    this.roadsChanged = false;
     this.nukes = [];
     this.bombers = [];
     this.allianceRequests = new Map();
@@ -298,6 +306,7 @@ class Game {
     return null;
   }
   hostile(a, b) { return a && b && a !== b && !a.isFriendly(b); }
+  sameTeam(a, b) { return !!(a && b && a.team && a.team === b.team); }
 
   // ---- players -------------------------------------------------------------
   addPlayer({ id, name, type, flag }) {
@@ -320,7 +329,8 @@ class Game {
   addAIPlayers(NationAI, BotAI) {
     const manifestNations = [...(this.map.nations || [])];
     for (let i = manifestNations.length - 1; i > 0; i--) { const j = this.rng.int(0, i); [manifestNations[i], manifestNations[j]] = [manifestNations[j], manifestNations[i]]; }
-    for (let i = 0; i < this.settings.nations; i++) {
+    const nationCount = this.settings.nationsDefault && manifestNations.length ? manifestNations.length : this.settings.nations;
+    for (let i = 0; i < nationCount; i++) {
       const mn = manifestNations[i];
       const name = mn ? mn.name : GENERIC_NATION_NAMES[i % GENERIC_NATION_NAMES.length];
       const p = this.addPlayer({ id: `nation-${i + 1}`, name, type: PlayerType.NATION, flag: mn ? mn.flag : '' });
@@ -331,6 +341,7 @@ class Game {
       const p = this.addPlayer({ id: `bot-${i + 1}`, name: BOT_NAMES[i % BOT_NAMES.length], type: PlayerType.BOT });
       p.ai = new BotAI(this, p, (hashString(p.id) ^ this.map.seed) >>> 0);
     }
+    this.assignTeams();
   }
   player(id) { return this.playersById.get(id) || null; }
 
@@ -475,6 +486,7 @@ class Game {
     to.units.push(u);
     this.unitsChanged = true;
     this.onStationOwnerChanged(u);
+    this.onRoadUnitChanged(u);
   }
   removeUnit(u) {
     if (u.type === UnitType.LAB) this.onLabLost(u);
@@ -483,6 +495,7 @@ class Game {
     this.unitByTile.delete(u.tile);
     this.unitsChanged = true;
     this.onUnitRemoved(u);
+    this.onRoadUnitChanged(u);
   }
   neighborsOf(p) {
     const set = new Set();
@@ -561,6 +574,7 @@ class Game {
     this.tick++;
     if (this.phase === 'over') return;
     if (this.phase === 'spawn') {
+      this.tickRandomSpawn();
       for (const p of this.players) if (p.ai) p.ai.tick();
       if (this.tick >= this.spawnTicks) this.endSpawnPhase();
       return;
@@ -595,10 +609,12 @@ class Game {
     this.tickBoats();
     this.tickTrade();
     this.tickTrains();
+    this.tickRoads();
     this.tickWarships();
     this.tickSubs();
     this.tickMines();
     this.tickMechs();
+    this.tickSwarms();
     this.tickAirships();
     this.tickShells();
     this.tickNukes();
@@ -613,6 +629,8 @@ class Game {
     this.expireAllianceRequests();
     for (const p of this.players) if (p.ai && p.alive) p.ai.tick();
     this.checkDeaths();
+    this.tickAllianceExpiry();
+    this.tickDoomsday();
     if (this.tick % 10 === 0) this.checkWin();
   }
   endSpawnPhase() {
@@ -639,18 +657,26 @@ class Game {
       }
     }
   }
+  // A side (a team, or a lone nation/player) wins by holding the land needed (see modes.js: overtime and
+  // game length change that). The last one standing also wins; if only tribes are left, the biggest does.
   checkWin() {
-    const need = this.config.percentageTilesOwnedToWin() / 100 * this.numLand;
-    let best = null;
-    for (const p of this.players) if (p.alive && (best === null || p.tiles.size > best.tiles.size)) best = p;
-    if (!best) return;
-    const aliveCount = this.players.filter((p) => p.alive).length;
-    if (best.tiles.size >= need || (aliveCount === 1 && this.tick > this.spawnTicks + 100)) {
-      this.phase = 'over';
-      this.winner = best;
-      this.winTick = this.tick;
-      this.events.push({ k: 'win', p: best.smallID });
+    let side = this.modeWinner();
+    if (!side) {
+      const alive = this.players.filter((p) => p.alive);
+      if (!alive.length) return;
+      const settled = this.tick > this.spawnTicks + 100;
+      if (settled && (alive.length === 1 || !alive.some((p) => p.type !== PlayerType.BOT))) {
+        const best = alive.sort((a, b) => b.tiles.size - a.tiles.size)[0];
+        side = { team: this.teamOf(best), players: [best] };
+      }
     }
+    if (!side) return;
+    const best = side.players.slice().sort((a, b) => b.tiles.size - a.tiles.size)[0];
+    this.phase = 'over';
+    this.winner = best;
+    this.winnerTeam = side.team ? side.team.id : 0;
+    this.winTick = this.tick;
+    this.events.push({ k: 'win', p: best.smallID, team: this.winnerTeam });
   }
 
   // ---- attacks ----------------------------------------------------------------
@@ -796,15 +822,24 @@ class Game {
     return this.regionsCache;
   }
   // A mech holds ground like a defense post: attacks near one bleed harder and crawl.
-  hasMechNearby(owner, tile) {
+  hasMechNearby(owner, tile, range = 0, onLand = false) {
     if (!owner.mechs.length) return false;
-    const r = this.config.mechAuraRange(), x = this.x(tile), y = this.y(tile);
+    const r = range || this.config.mechAuraRange(), x = this.x(tile), y = this.y(tile);
     for (const m of owner.mechs) {
-      if (m.done) continue;
+      if (m.done || (onLand && m.onWater)) continue;
       if (Math.abs(m.x - x) > r || Math.abs(m.y - y) > r) continue;
       if ((m.x - x) ** 2 + (m.y - y) ** 2 <= r * r) return true;
     }
     return false;
+  }
+  // The mech (if any) whose hold zone covers this tile of its owner's land.
+  mechHolding(owner, tile) {
+    const r = this.config.mechHoldRadius(), x = this.x(tile) + 0.5, y = this.y(tile) + 0.5;
+    for (const m of owner.mechs) {
+      if (m.done || m.onWater || m.refit) continue;
+      if (Math.abs(m.x - x) <= r && Math.abs(m.y - y) <= r && (m.x - x) ** 2 + (m.y - y) ** 2 <= r * r) return m;
+    }
+    return null;
   }
   hasDefensePostNearby(owner, tile) {
     const r = this.config.defensePostRange();
@@ -859,6 +894,19 @@ class Game {
           a.recent[a.recentI++ % FRONT_SAMPLE] = tile;
           continue;
         }
+        // A mech holds the ground right around it: those tiles can't be taken while it stands. Troops
+        // throwing themselves at the pocket chip at the mech and bleed for it (see config mechHold*).
+        if (target && target.mechs.length) {
+          const holder = this.mechHolding(target, tile);
+          if (holder) {
+            holder.hp -= cfg.mechHoldChip(troops);
+            troops -= Math.min(troops * 0.0005, cfg.mechHoldBleed());
+            a.troops = troops;
+            tickBudget -= 0.5;
+            a.heap.push(tile, this.tick + 5); a.border.add(tile);
+            continue;
+          }
+        }
         this.attackAddNeighbors(a, tile);
         const res = cfg.attackLogic({
           terrain: this.terrainType(tile),
@@ -868,6 +916,7 @@ class Game {
           defenderHasDefensePost: target ? this.hasDefensePostNearby(target, tile) : false,
           isDefenderBorder: target ? target.border.has(tile) : false,
           defenderHasMech: target ? this.hasMechNearby(target, tile) : false,
+          attackerHasMech: target ? this.hasMechNearby(attacker, tile, this.config.mechSpearheadRange(), true) : false,
           falloutRatio: this.fallout[tile] ? this.numFallout / this.numLand : null,
           borderSize,
           attackSpeedMult: speedMult,
@@ -944,6 +993,7 @@ class Game {
   // ---- alliances ------------------------------------------------------------------
   requestAlliance(from, to) {
     if (!from.alive || !to.alive || from === to) return false;
+    if (this.isTeamGame() && from.team !== to.team) return false;   // team games: your team is your alliance
     if (from.allies.has(to.id)) return false;
     const key = `${from.id}|${to.id}`;
     if (this.allianceRequests.has(key)) return false;
@@ -963,6 +1013,7 @@ class Game {
   }
   acceptAlliance(a, b) {
     a.allies.add(b.id); b.allies.add(a.id);
+    a.allianceSince.set(b.id, this.tick); b.allianceSince.set(a.id, this.tick);
     a.warsDeclared.delete(b.smallID); b.warsDeclared.delete(a.smallID);
     a.updateRelation(b, 30); b.updateRelation(a, 30);
     for (const atk of this.attacks) {
@@ -973,6 +1024,7 @@ class Game {
   breakAlliance(breaker, other) {
     if (!breaker.allies.has(other.id)) return false;
     breaker.allies.delete(other.id); other.allies.delete(breaker.id);
+    breaker.allianceSince.delete(other.id); other.allianceSince.delete(breaker.id);
     breaker.traitorUntil = this.tick + this.config.traitorDurationTicks();
     other.updateRelation(breaker, -100);
     this.events.push({ k: 'betrayed', by: breaker.smallID, p: other.smallID });
@@ -1054,7 +1106,7 @@ class Game {
       width: this.width, height: this.height, numLand: this.numLand, mapName: this.map.name,
       terrain: this.b64(this.terrain), owner: this.b64(this.owner), fallout: this.b64(this.fallout), walls: this.b64(this.wallHp),
       players: this.players.map((p) => this.playerInfo(p)),
-      stats: this.statsPacket(), units: this.unitsPacket(viewer), mechs: this.mechsPacket(), rails: this.railsPacket(),
+      stats: this.statsPacket(), units: this.unitsPacket(viewer), mechs: this.mechsPacket(), rails: this.railsPacket(), roads: this.roadsPacket(), teams: this.teamsPacket(), winnerTeam: this.winnerTeam || 0,
       research: RESEARCH, settings: this.settings, winner: this.winner ? this.winner.smallID : 0,
     };
   }
@@ -1063,7 +1115,7 @@ class Game {
     return this.players.map((p) => [
       p.smallID, Math.floor(p.troops), Math.floor(p.gold), p.numTiles,
       (p.spawned ? 1 : 0) | (p.alive ? 2 : 0) | (p.isTraitor() ? 4 : 0) | (p.disconnected ? 8 : 0),
-      Math.floor(cfg.maxTroops(p)), [...p.allies].map((id) => this.player(id)?.smallID || 0),
+      Math.floor(cfg.maxTroops(p)), [...p.allies].map((id) => this.player(id)?.smallID || 0).concat(p.team ? this.players.filter((q) => q !== p && q.team === p.team).map((q) => q.smallID) : []),
       Math.floor(p.alive ? cfg.troopIncreaseRate(p) * TICKS_PER_SECOND : 0),
       [[...p.researches], p.research ? [p.research.id, Math.max(0, p.research.doneTick - this.tick), Math.max(1, p.research.doneTick - (p.research.startTick ?? this.tick))] : null, null],
       this.attackPower(p), this.economyPower(p), p.numWallTiles, p.mechs.length,
@@ -1072,6 +1124,7 @@ class Game {
       p.airships.filter((a) => !a.done).length, p.airshipsBuilt || 0, cfg.maxResearchesPerPlayer(p),
       this.incomePacket(p),
       [...p.warsDeclared.keys()], this.powerPacket(p),
+      p.team, p.doomedAt ? Math.floor((this.tick - p.doomedAt) / 10) : -1,
     ]);
   }
   // Where this nation's money comes from, per second: the passive parts exactly, the lumpy ones
@@ -1152,11 +1205,13 @@ class Game {
     }
     return out;
   }
-  mechsPacket() { return this.mechs.filter((m) => !m.done).map((m) => [m.id, m.owner.smallID, this.r1(m.x), this.r1(m.y), Math.round(m.hp), Math.round(m.maxHp), m.engaged ? 1 : 0, m.level, m.patrol, Math.max(0, m.cannonReady - this.tick), m.range, m.mode, m.orderTarget, m.refit ? 1 : 0]); }
+  mechsPacket() { return this.mechs.filter((m) => !m.done).map((m) => [m.id, m.owner.smallID, this.r1(m.x), this.r1(m.y), Math.round(m.hp), Math.round(m.maxHp), m.engaged ? 1 : 0, m.level, m.patrol, Math.max(0, m.cannonReady - this.tick), m.range, m.mode, m.orderTarget, m.refit ? 1 : 0, m.onWater && !R.mechCrossesWater(m.owner) ? 1 : 0]); }
+  swarmsPacket() { return this.swarms.filter((s) => !s.done).map((s) => [s.id, s.owner.smallID, this.r1(s.x), this.r1(s.y), Math.floor(s.troops), s.target.id]); }
   shellsPacket() { return this.shells.map((s) => [s.id, s.owner.smallID, this.r1(s.x), this.r1(s.y), this.r1(s.tx), this.r1(s.ty), s.kind]); }
   trainsPacket() { return this.trains.filter((t) => !t.done).map((t) => [t.id, t.owner.smallID, this.r1(t.x), this.r1(t.y), t.cars.map((c) => [this.r1(c.x), this.r1(c.y)])]); }
   railsPacket() { return this.rails.map((r) => [r.id, r.a.id, r.b.id, r.tiles]); }
-  nukesPacket() { return this.nukes.map((n) => [n.id, n.type, n.owner.smallID, this.r1(n.x), this.r1(n.y), n.tx, n.ty, n.sx, n.sy]); }
+  roadsPacket() { return this.roads.map((r) => [r.id, r.a.id, r.b.id, r.tiles]); }
+  nukesPacket() { return this.nukes.filter((n) => !n.wait).map((n) => [n.id, n.type, n.owner.smallID, this.r1(n.x), this.r1(n.y), n.tx, n.ty, this.r1(n.sx), this.r1(n.sy)]); }
   bombersPacket() { return this.bombers.map((b) => [b.id, b.owner.smallID, this.r1(b.x), this.r1(b.y), this.r1(b.tx), this.r1(b.ty)]); }
   drainTickPacket() {
     const tiles = [];
@@ -1174,18 +1229,21 @@ class Game {
     if (this.tick % 5 === 0 || this.phase === 'over') pkt.stats = this.statsPacket();
     if (this.attacks.length) pkt.attacks = this.attacksPacket();   // every tick: the marker has to glide
     else if (this.tick % 5 === 0) pkt.attacks = [];
-    const mobile = this.airships.length || this.boats.length || this.nukes.length || this.tradeShips.length || this.warships.length || this.subs.length || this.shells.length || this.trains.length || this.bombers.length;
+    const mobile = this.airships.length || this.boats.length || this.nukes.length || this.tradeShips.length || this.warships.length || this.subs.length || this.shells.length || this.trains.length || this.bombers.length || this.swarms.length;
     if (mobile || this.tick % 5 === 0) {
       pkt.boats = this.boatsPacket(); pkt.nukes = this.nukesPacket(); pkt.trade = this.tradePacket();
-      pkt.shells = this.shellsPacket(); pkt.trains = this.trainsPacket(); pkt.bombers = this.bombersPacket();
+      pkt.shells = this.shellsPacket(); pkt.trains = this.trainsPacket(); pkt.bombers = this.bombersPacket(); pkt.swarms = this.swarmsPacket();
       pkt.ships = true; // filled per client (submarine visibility)
     }
     if (this.mechs.length || this.tick % 20 === 0) pkt.mechs = this.mechsPacket();
     if (this.airships.length || this.tick % 20 === 0) pkt.airships = this.airshipsPacket();
     if (this.unitsChanged || this.tick % 50 === 0) { pkt.units = true; this.unitsChanged = false; }   // filled per viewer (mines)
     if (this.railsChanged) { pkt.rails = this.railsPacket(); this.railsChanged = false; }
+    if (this.roadsChanged) { pkt.roads = this.roadsPacket(); this.roadsChanged = false; }
     if (this.phase === 'spawn') pkt.spawnLeft = this.spawnTicks - this.tick;
-    if (this.phase === 'over') pkt.winner = this.winner ? this.winner.smallID : 0;
+    if (this.phase === 'over') { pkt.winner = this.winner ? this.winner.smallID : 0; pkt.winnerTeam = this.winnerTeam || 0; }
+    if (this.settings.doomsdayClock && this.tick % 10 === 0) pkt.doom = Math.round(this.doomBar() * 1000) / 10;
+    if (this.tick % 10 === 0 && this.settings.overtimeMinutes > 0) pkt.winPct = this.winPercent();
     const reqs = [];
     for (const r of this.allianceRequests.values()) if (r.to.type === PlayerType.HUMAN) reqs.push([r.from.smallID, r.to.id]);
     if (reqs.length || this.tick % 10 === 0) pkt.allyReqs = reqs;
@@ -1194,6 +1252,6 @@ class Game {
 }
 
 // ---- mix in the other systems ----
-Object.assign(Game.prototype, require('./units'), require('./navy'), require('./rails'), require('./mechs'), require('./nukes'), require('./air'), require('./refit'), require('./inspect'), require('./intel'));
+Object.assign(Game.prototype, require('./units'), require('./navy'), require('./rails'), require('./mechs'), require('./nukes'), require('./air'), require('./refit'), require('./inspect'), require('./intel'), require('./modes'));
 
 module.exports = { Game, Player, PlayerType, UnitType, NukeType, newId };

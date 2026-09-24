@@ -6,15 +6,24 @@
 // water), super tanky, and bleed HP while standing in hostile territory.
 //
 // Each mech runs one of four standing orders (`mode`):
-//   hold    - sit on the patrol point it was given and circle it (the default, what a click sets)
+//   defend  - "Guard", the default: wait at a post, and the moment an attack hits our land drive to that
+//             front on our own roads, hold it and shell the attacking troops; go back to the post after
+//   hold    - sit on the point it was sent to and circle it (a click into enemy land sets this)
 //   roam    - walk its owner's border, favouring the stretch closest to trouble
-//   defend  - answer incoming attacks: nearest first, then whichever is throwing the most troops
 //   assault - march into one named nation and keep wrecking whatever is in range
-// A mech also anchors ground: attacks near one bleed 3x troops and crawl at half speed (see config
-// mechAuraRange / mechDefenseBonus). Mixed into Game.prototype.
+// What a mech is for:
+//   * defence - attacks near it bleed 3x troops and crawl (mechAuraRange / mechDefenseBonus), and its
+//     shells go into the attacking army itself (mechAttackKill)
+//   * offence - the spearhead: its owner's attacks near it take ground twice as fast for half the losses,
+//     and when its owner is attacking that nation its stomps and shells take the ground for its owner
+//     (a bridgehead the attack pours through) instead of just flattening it
+//   * any mech can cross the sea on a slow barge; warships can shell it there
+// The counter is a swarm: troops sent straight at the mech, each one taking a bite out of it.
+// Mixed into Game.prototype.
 const { UnitType, PlayerType, within } = require('./config');
 const MECH_MODES = ['hold', 'roam', 'defend', 'assault'];
 const REORDER_INTERVAL = 40;   // ticks between standing-order re-evaluations
+const GUARD_REORDER_INTERVAL = 12;   // a guarding mech checks for attacks far more often
 const { newId } = require('./ids');
 const { astar, resamplePath } = require('./path');
 const R = require('./research').effects;
@@ -23,6 +32,7 @@ module.exports = {
   mechFactories(p) { return p.completedUnitsOf(UnitType.FACTORY).filter((f) => f.level >= this.config.mechFactoryLevelRequired()); },
   canBuildMech(p, targetTile, fromTile = -1) {
     if (!p.alive) return { ok: false, reason: 'dead' };
+    if (this.unitDisabled('mech')) return { ok: false, reason: 'Mechs are disabled in this game' };
     const amph = R.mechCrossesWater(p);
     if (!this.isLand(targetTile) && !(amph && this.isWater(targetTile))) return { ok: false, reason: amph ? 'Pick a land or water tile' : 'Mechs are land-locked: pick a land tile' };
     const facs = this.mechFactories(p);
@@ -42,7 +52,7 @@ module.exports = {
     const hp = this.config.mechBaseHp(p, lvl);
     const m = { id: newId(), owner: p, level: lvl, x: this.x(c.factory.tile) + 0.5, y: this.y(c.factory.tile) + 0.5, hp, maxHp: hp, range: this.config.mechRange(p, lvl),
       patrol: targetTile, pts: [], idx: 0, wanderAt: 0, cannonReady: this.tick + 20, stompReady: this.tick + 10, engaged: false, engagedUntil: 0, onWater: false, done: false,
-      mode: 'hold', orderTarget: 0, reorderAt: 0 };
+      mode: 'defend', post: targetTile, orderTarget: 0, reorderAt: 0, isMech: true };
     p.mechs.push(m);
     this.mechs.push(m);
     this.mechPathTo(m, targetTile);
@@ -55,9 +65,13 @@ module.exports = {
     if (!this.isLand(tile) && !(R.mechCrossesWater(p) && this.isWater(tile))) return { ok: false, reason: R.mechCrossesWater(p) ? 'Pick a land or water tile' : 'Mechs are land-locked' };
     if (m.refit) this.cancelRefit(m);
     m.patrol = tile;
-    m.mode = 'hold';
+    // sent into someone else's country: hold there and fight. Anywhere else: that is its new guard post.
+    const o = this.ownerOf(tile);
+    if (o && this.hostile(p, o)) m.mode = 'hold';
+    else { m.mode = 'defend'; m.post = tile; }
+    m.reorderAt = this.tick + 30;
     this.mechPathTo(m, tile);
-    return { ok: true };
+    return { ok: true, mode: m.mode };
   },
   // Standing orders. `targetSm` only matters for 'assault' and must be a nation we may attack.
   setMechMode(p, id, mode, targetSm = 0) {
@@ -71,7 +85,7 @@ module.exports = {
       if (p.isFriendly(o)) return { ok: false, reason: `You are allied with ${o.name}` };
       target = targetSm;
     }
-    for (const m of mechs) { m.mode = mode; m.orderTarget = target; m.reorderAt = 0; }
+    for (const m of mechs) { m.mode = mode; m.orderTarget = target; m.reorderAt = 0; if (mode === 'defend') m.post = m.patrol; }
     return { ok: true, count: mechs.length, mode, target };
   },
   // Where should a mech be standing right now, given its orders? Returns a tile or -1 to stay put.
@@ -97,7 +111,11 @@ module.exports = {
       }
       case 'defend': {
         const live = p.incomingAttacks.filter((a) => !a.done && a.troops > 0);
-        if (!live.length) return -1;
+        if (!live.length) {
+          // nothing to answer: back to the guard post
+          if (m.post >= 0 && Math.hypot(this.x(m.post) - m.x, this.y(m.post) - m.y) > this.config.mechPatrolRadius() * 2) return m.post;
+          return -1;
+        }
         // nearest first, then whoever is committing the most troops
         let best = null, bestScore = -Infinity;
         for (const a of live) {
@@ -107,12 +125,28 @@ module.exports = {
           if (score > bestScore) { bestScore = score; best = a; }
         }
         if (!best) return -1;
+        // stand on our side of that front (the nearest of our border tiles), not in the ground they took
+        let bt = -1, bd = Infinity, n = 0;
+        const step = Math.max(1, Math.floor(p.border.size / 400));
+        for (const t of p.border) {
+          if (n++ % step) continue;
+          const d = (this.x(t) - best.markX) ** 2 + (this.y(t) - best.markY) ** 2;
+          if (d < bd) { bd = d; bt = t; }
+        }
+        if (bt >= 0) return bt;
         const t = this.ref(Math.round(within(best.markX, 0, this.width - 1)), Math.round(within(best.markY, 0, this.height - 1)));
         return this.isLand(t) ? t : -1;
       }
       case 'assault': {
         const o = this.playersBySmall[m.orderTarget];
         if (!o || !o.alive || p.isFriendly(o)) { m.mode = 'roam'; return -1; }
+        // our troops are already pushing into them: walk at the head of that push (the ground behind the
+        // front is freshly ours, so the mech keeps up), where the spearhead bonus does the most good
+        const push = p.outgoingAttacks.filter((a) => !a.done && a.target === o && a.markX >= 0).sort((a, b) => b.troops - a.troops)[0];
+        if (push) {
+          const t = this.ref(Math.round(within(push.markX, 0, this.width - 1)), Math.round(within(push.markY, 0, this.height - 1)));
+          if (this.isLand(t)) return t;
+        }
         // head for their nearest border tile, so the mech chews the edge rather than diving into the middle
         let best = -1, bd = Infinity;
         let n = 0;
@@ -126,11 +160,101 @@ module.exports = {
       default: return -1;
     }
   },
-  mechCost(p) { const amph = R.mechCrossesWater(p); return (t) => (this.isLand(t) ? (this.wallHp[t] && this.owner[t] !== p.smallID ? 3 : 1) : amph && this.isWater(t) ? 2.5 : 0); },
+  // Route cost follows how fast a mech moves on the ground: its own roads are cheapest, an ally's next,
+  // then empty land, and a foreign country (where it crawls) is avoided unless it is the only way. Water
+  // is fine for a water-doctrine mech and costly (a slow barge) for the rest.
+  mechCost(p) {
+    const amph = R.mechCrossesWater(p), me = p.smallID;
+    return (t) => {
+      if (this.isLand(t)) {
+        const o = this.owner[t];
+        if (o === me) return 1;
+        if (o === 0) return 2.5;
+        const q = this.playersBySmall[o];
+        return (q && p.isFriendly(q) ? 1.5 : 4) + (this.wallHp[t] ? 3 : 0);
+      }
+      return this.isWater(t) ? (amph ? 2.5 : 5) : 0;
+    };
+  },
   mechPathTo(m, tile) {
     const path = astar(this, [this.tileAt(m.x, m.y)], tile, this.mechCost(m.owner), { maxIter: 150000 });
     if (path && path.length > 1) { m.pts = resamplePath(this, path, 1); m.idx = 0; }
     else { m.pts = []; m.idx = 0; }
+  },
+  // What a mech's stomp and its shells do to hostile ground. If its owner has troops attacking that
+  // nation, the ground becomes the owner's - a bridgehead the attack pours through (buildings on it are
+  // captured, as an attack would). Otherwise it is only flattened to empty land. Either way the owner of
+  // the ground loses troops and walls take a beating.
+  mechBreach(by, cx, cy, r, troopKill, warBite = 0) {
+    const icx = Math.floor(cx), icy = Math.floor(cy);
+    const hit = new Map(), atWar = new Map();
+    for (let y = Math.max(0, icy - r); y <= Math.min(this.height - 1, icy + r); y++) {
+      for (let x = Math.max(0, icx - r); x <= Math.min(this.width - 1, icx + r); x++) {
+        if ((x - icx) ** 2 + (y - icy) ** 2 > r * r) continue;
+        const t = this.ref(x, y);
+        if (!this.isLand(t)) continue;
+        const o = this.ownerOf(t);
+        if (!o || !this.hostile(by, o)) continue;
+        hit.set(o, (hit.get(o) || 0) + 1);
+        if (this.wallHp[t]) { const d = 6000 * R.wallDamageMultiplier(o); if (this.wallHp[t] <= d) this.clearWallTile(t); else { this.wallHp[t] -= d; continue; } }
+        if (!atWar.has(o)) atWar.set(o, by.outgoingAttacks.some((a) => !a.done && a.target === o));
+        if (atWar.get(o)) this.conquer(by, t);
+        else { const u = this.unitAt(t); if (u) this.removeUnit(u); this.relinquish(t); }
+      }
+    }
+    for (const [o, n] of hit) {
+      // against a nation we are attacking, every hit also takes a bite out of its army: a mech leading an
+      // offensive grinds the defenders down, which is what makes the troops behind it cheap to push
+      const bite = atWar.get(o) ? o.troops * warBite : 0;
+      o.removeTroops((troopKill + bite) * Math.min(1, n / 8));
+      o.updateRelation(by, -20);
+      if (atWar.get(o)) this.handleDeadDefender(by, o);
+    }
+  },
+  // ---- swarms: troops sent straight at an enemy mech ----
+  swarmMech(p, mechId, troops) {
+    if (!p.alive) return { ok: false, reason: 'dead' };
+    const m = this.mechs.find((x) => x.id === mechId && !x.done);
+    if (!m || !this.hostile(p, m.owner)) return { ok: false, reason: 'Pick an enemy mech' };
+    if (!this.canAttack(p, m.owner)) return { ok: false, reason: `You can't attack ${m.owner.name} yet` };
+    if (m.onWater) return { ok: false, reason: "It's at sea - troops can't reach it (use warships)" };
+    troops = Math.min(p.troops, Math.floor(troops));
+    if (!(troops >= 1000)) return { ok: false, reason: 'Send at least 1,000 troops' };
+    // run from the nearest of our own tiles
+    let from = -1, bd = Infinity, n = 0;
+    const step = Math.max(1, Math.floor(p.border.size / 500));
+    for (const t of p.border) {
+      if (n++ % step) continue;
+      const d = (this.x(t) - m.x) ** 2 + (this.y(t) - m.y) ** 2;
+      if (d < bd) { bd = d; from = t; }
+    }
+    const range = this.config.swarmRange();
+    if (from < 0 || bd > range * range) return { ok: false, reason: `Too far: a swarm runs at most ${range} tiles from your land` };
+    p.removeTroops(troops);
+    const s = { id: newId(), owner: p, x: this.x(from) + 0.5, y: this.y(from) + 0.5, troops, target: m, done: false };
+    this.swarms.push(s);
+    this.events.push({ k: 'swarm', by: p.smallID, p: m.owner.smallID, troops });
+    return { ok: true, troops };
+  },
+  tickSwarms() {
+    if (!this.swarms.length) return;
+    const sp = this.config.swarmSpeed(), per = this.config.swarmDamagePerTroop();
+    for (const s of this.swarms) {
+      if (s.done) continue;
+      const m = s.target;
+      // the mech is gone (or put to sea): the survivors walk home
+      if (!s.owner.alive || m.done || m.onWater || s.troops < 50) { if (s.owner.alive) s.owner.addTroops(s.troops * 0.5); s.done = true; continue; }
+      const dx = m.x - s.x, dy = m.y - s.y, d = Math.hypot(dx, dy);
+      if (d <= sp + 1) {
+        const dmg = s.troops * per;
+        m.hp -= dmg;
+        this.events.push({ k: 'swarmHit', by: s.owner.smallID, p: m.owner.smallID, x: m.x, y: m.y, dmg: Math.round(dmg), kill: m.hp <= 0 });
+        s.done = true;
+        continue;
+      }
+      s.x += (dx / d) * sp; s.y += (dy / d) * sp;
+    }
+    this.swarms = this.swarms.filter((s) => !s.done);
   },
   mechAtTile(tile) {
     const x = this.x(tile), y = this.y(tile);
@@ -150,7 +274,7 @@ module.exports = {
       m.onWater = this.isWater(here);
       // ---- standing orders: re-aim the patrol point periodically ----
       if (m.mode !== 'hold' && this.tick >= m.reorderAt) {
-        m.reorderAt = this.tick + REORDER_INTERVAL + this.rng.int(0, 20);
+        m.reorderAt = this.tick + (m.mode === 'defend' ? GUARD_REORDER_INTERVAL : REORDER_INTERVAL) + this.rng.int(0, 10);
         const want = this.mechOrderTile(m);
         if (want >= 0 && want !== m.patrol && this.pathBudget > 0) {
           const far = Math.hypot(this.x(want) - m.x, this.y(want) - m.y) > cfg.mechPatrolRadius();
@@ -159,7 +283,8 @@ module.exports = {
       }
       // ---- movement: to the patrol point, then circle it ----
       const groundOwner = this.ownerOf(here);
-      const ground = !groundOwner ? 'neutral' : groundOwner === p ? 'own' : p.isFriendly(groundOwner) ? 'ally' : 'enemy';
+      let ground = !groundOwner ? 'neutral' : groundOwner === p ? 'own' : p.isFriendly(groundOwner) ? 'ally' : 'enemy';
+      if (ground === 'enemy' && m.mode === 'defend' && p.incomingAttacks.some((a) => !a.done && a.attacker === groundOwner)) ground = 'neutral';
       const speed = cfg.mechSpeed(p, m.onWater, ground);
       if (m.pts.length && m.idx < m.pts.length - 1) this.advanceAlong(m, speed);
       else if (this.tick >= m.wanderAt) {
@@ -167,7 +292,7 @@ module.exports = {
         const pr = cfg.mechPatrolRadius(), px = this.x(m.patrol), py = this.y(m.patrol);
         const ang = this.rng.next() * Math.PI * 2;
         const gx = Math.round(px + Math.cos(ang) * pr), gy = Math.round(py + Math.sin(ang) * pr);
-        if (this.valid(gx, gy)) { const gt = this.ref(gx, gy); if (this.mechCost(p)(gt) > 0) this.mechPathTo(m, gt); }
+        if (this.valid(gx, gy)) { const gt = this.ref(gx, gy); if (this.isLand(gt) || (R.mechCrossesWater(p) && this.isWater(gt))) this.mechPathTo(m, gt); }
       }
       // ---- damage from standing in hostile territory ----
       const o = this.ownerOf(here);
@@ -179,28 +304,32 @@ module.exports = {
         m.hp -= dmg;
       }
       m.engaged = this.tick < m.engagedUntil;
+      // on a barge a mech is cargo: it neither fires nor stomps until it is ashore
+      const barge = m.onWater && !R.mechCrossesWater(p);
+      // Standing on home soil with nothing actually threatening us, a mech holds fire rather than
+      // shelling the countryside. It still answers anything hostile that comes into range.
+      const passive = m.mode !== 'assault' && (ground === 'own' || ground === 'ally');
       // ---- cannon ----
-      if (this.tick >= m.cannonReady) {
-        // Standing on home soil with nothing actually threatening us, a mech holds fire rather than
-        // shelling the countryside. It still answers anything hostile that comes into range.
-        const passive = (m.mode === 'hold' || m.mode === 'roam') && (ground === 'own' || ground === 'ally');
+      if (!barge && this.tick >= m.cannonReady) {
         const target = this.mechPickTarget(m, passive);
         if (target) {
           if (target.kind === 'air') this.fireShell(p, m, target.obj, 'flak', { speed: 7, life: 60 });
           else if (target.kind === 'ship') this.fireShell(p, m, target.obj, 'mechAA', { dmg: cfg.mechShipDamage(p), speed: 4 });
+          else if (target.kind === 'swarm') { const sh = this.fireShell(p, m, target.obj, 'mech', { speed: 6, life: 60, level: m.level }); sh.swarm = target.obj; }
+          else if (target.kind === 'troops') { const sh = this.fireShell(p, m, null, 'mech', { tx: target.x, ty: target.y, speed: 4, life: 80, level: m.level }); sh.attackId = target.attack.id; }
           else this.fireShell(p, m, null, 'mech', { tx: target.x, ty: target.y, structTile: target.structTile ?? -1, dmg: cfg.mechShellDamage(p, m.level), troopKill: cfg.mechTroopKillPerShell(p, m.level), speed: 4, life: 80, level: m.level });
-          m.cannonReady = this.tick + cfg.mechCannonCooldown(p);
+          m.cannonReady = this.tick + (target.kind === 'troops' || target.kind === 'swarm' ? Math.ceil(cfg.mechCannonCooldown(p) / cfg.mechSuppressFactor()) : cfg.mechCannonCooldown(p));
           m.engagedUntil = this.tick + 40;
         } else m.cannonReady = this.tick + 10;
       }
       // ---- stomp: clear hostile land underfoot ----
-      if (this.tick >= m.stompReady && !((m.mode === 'hold' || m.mode === 'roam') && ground === 'own')) {
+      if (!barge && this.tick >= m.stompReady && !passive) {
         const r = cfg.mechStompRadius(p);
         let hostileNear = false;
         const ix = Math.floor(m.x), iy = Math.floor(m.y);
         for (let dy = -r; dy <= r && !hostileNear; dy++) for (let dx = -r; dx <= r; dx++) { const x = ix + dx, y = iy + dy; if (!this.valid(x, y)) continue; const q = this.ownerOf(this.ref(x, y)); if (q && this.hostile(p, q)) { hostileNear = true; break; } }
         if (hostileNear) {
-          this.neutralizeArea(p, m.x, m.y, r, cfg.mechTroopKillPerShell(p, m.level) * 0.4, 'mech');
+          this.mechBreach(p, m.x, m.y, r, cfg.mechTroopKillPerShell(p, m.level) * 0.4, cfg.mechWarBite(p, m.level) / 4);
           // walls and defense posts under the stomp take a beating
           this.damageWallsAround(ix, iy, r + 1, 8000 * R.mechBreachMultiplier(p));
           m.stompReady = this.tick + cfg.mechStompCooldown(p);
@@ -229,6 +358,29 @@ module.exports = {
     }
     let best = null, bd = Infinity;
     for (const o of this.mechs) { if (o === m || o.done || !this.hostile(p, o.owner)) continue; const d = (o.x - m.x) ** 2 + (o.y - m.y) ** 2; if (d <= r2 && d < bd) { bd = d; best = { x: o.x, y: o.y }; } }
+    if (best) return best;
+    // a swarm of troops running at us
+    for (const s of this.swarms) { if (s.done || !this.hostile(p, s.owner)) continue; const d = (s.x - m.x) ** 2 + (s.y - m.y) ** 2; if (d <= r2 * 1.3 && d < bd) { bd = d; best = { kind: 'swarm', obj: s }; } }
+    if (best) return best;
+    // an army attacking us or an ally: shell the front of the biggest one in reach
+    let most = 0;
+    const reach = (r + 8) * (r + 8);
+    for (const a of this.attacks) {
+      if (a.done || !a.target || !this.hostile(p, a.attacker) || !(a.target === p || p.isFriendly(a.target)) || a.troops <= most) continue;
+      // the nearest point of that attack's front we can reach: its marker, or any tile it is about to take
+      let fx = -1, fy = -1, fd = reach;
+      if (a.markX >= 0) { const d = (a.markX - m.x) ** 2 + (a.markY - m.y) ** 2; if (d <= fd) { fd = d; fx = a.markX; fy = a.markY; } }
+      if (fx < 0 && a.border.size) {
+        let n = 0;
+        const step = Math.max(1, Math.floor(a.border.size / 150));
+        for (const t of a.border) {
+          if (n++ % step) continue;
+          const tx = this.x(t) + 0.5, ty = this.y(t) + 0.5, d = (tx - m.x) ** 2 + (ty - m.y) ** 2;
+          if (d <= fd) { fd = d; fx = tx; fy = ty; }
+        }
+      }
+      if (fx >= 0) { most = a.troops; best = { kind: 'troops', attack: a, x: fx, y: fy }; }
+    }
     if (best) return best;
     for (const u of this.units) {
       if (!this.hostile(p, u.owner) || u.type === UnitType.MINE) continue;

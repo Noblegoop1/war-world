@@ -24,6 +24,14 @@ const WORD_FADE = 0.7;          // a word not seen again keeps this share of its
 const WORD_FORGET = 0.15;       // below this it is forgotten
 const BELIEVE = 0.5;            // confidence at which a word counts as true
 const EARLY_GAME_TICKS = 3000;  // the first five minutes: alliances are cheap and useful
+// ---- the finish (see finishMoves) ----
+// How much stronger (ATK POWER) than an ally a nation must be before that alliance has outlived its
+// purpose (easy -> impossible). Boxed in or restless, it settles for three quarters of this.
+const OUTGROWN_RATIO = [4, 2.6, 1.9, 1.5];
+// Turns in a row sitting on a full army with nothing to do before a nation forces a decision.
+const IDLE_TURNS_LIMIT = [14, 9, 6, 3];
+const RUSH_TICKS = 1500;                        // a rush keeps sending waves for up to 2.5 minutes
+const RUSH_WAVE_SHARE = [0.4, 0.5, 0.6, 0.7];   // share of the army each wave commits
 // Words that make each choice attractive. A choice's appeal for a nation is the sum of its words'
 // confidence in that nation's entry of our memory.
 const CHOICE_WORDS = {
@@ -36,6 +44,8 @@ const CHOICE_WORDS = {
   buildPosts: ['aggressive', 'fast_attacks', 'invader', 'strong_army', 'attacking_me_now', 'danger'],
   airlift: ['sam_covered', 'sam_clump', 'walled', 'fortified', 'coastal_fort', 'overseas', 'shot_my_missiles'],
   mechTarget: { want: ['easy_prey', 'weak_army', 'shrinking', 'busy', 'at_war'], avoid: ['artillery_line', 'anti_mech', 'mech_army', 'fortified'] },
+  // finishing a nation off - a collapsing enemy, or an ally we have outgrown
+  finish: { want: ['easy_prey', 'weak_army', 'troops_depleted', 'shrinking', 'collapsing', 'populated', 'rich', 'small', 'busy', 'traitor', 'outgrown'], avoid: ['strong_army', 'fortified', 'walled', 'mech_army', 'deterrent', 'nuke_armed', 'giant'] },
 };
 const COLONISE_MIN_TROOP_RATIO = 0.35;     // don't ship out unless reasonably stocked
 const COLONISE_ISOLATION_BONUS = 1.5;      // how much an untouched island beats contested ground
@@ -91,6 +101,10 @@ class NationAI {
     this.sankBy = new Set();
     this.warCheckAfter = 0;
     this.assistAfter = 0;
+    // ---- the finish ----
+    this.rush = null;              // { target: smallID, until: tick } while we are going all-in on someone
+    this.idleTurns = 0;
+    this.betrayCheckAfter = 0;
   }
 
   get difficulty() { return this.cfg.difficulty(); }
@@ -124,6 +138,7 @@ class NationAI {
     this.handleStructures();
     this.handleNavy();
     this.handleMechs();
+    this.counterMechs();
     this.maybeAttack();
     this.maybeAirlift();
     this.maybeNuke();
@@ -266,6 +281,8 @@ class NationAI {
       const hostile = g.hostile(p, o);
       if (hostile && (nb || sameMass) && (w.has('strong_army') || w.has('aggressive') || attacking || (w.has('nuke_armed') && (this.grudge.get(o.smallID) || 0) > 0))) w.add('danger');
       if (hostile && nb && w.has('weak_army') && !w.has('fortified') && !w.has('walled')) w.add('easy_prey');
+      if (p.allies.has(o.id) && o.type !== PlayerType.BOT && o.troops * OUTGROWN_RATIO[d] < p.troops) w.add('outgrown');
+      if (this.rush && this.rush.target === o.smallID) w.add('rushing');
       // ---- fold into memory: seen words go to 1, the rest fade ----
       let m = this.mem.get(o.smallID);
       if (!m) { m = { conf: new Map(), seen: 0, clump: null }; this.mem.set(o.smallID, m); }
@@ -360,6 +377,108 @@ class NationAI {
       if (score > bestScore) { bestScore = score; best = o; }
     }
     return best ? this.sendAttack(best) : false;
+  }
+  // ======================================================================================
+  // The finish. A nation that is winning keeps its foot down: it breaks alliances that have outlived
+  // their purpose and rushes the former ally, finishes off neighbours that are collapsing, and never sits
+  // on a full army for long with nothing to do.
+  // ======================================================================================
+  finishMoves() {
+    const g = this.game, p = this.p;
+    // an active rush keeps sending waves until the target is gone or it stops paying
+    if (this.rush) {
+      const o = g.playersBySmall[this.rush.target];
+      if (!o || !o.alive || g.tick > this.rush.until || p.isFriendly(o) || o.troops > p.troops * 1.1 || this.posture === 'turtle') this.rush = null;
+      else if (this.rushWave(o)) return true;
+    }
+    const busy = p.outgoingAttacks.some((a) => !a.done) || p.boats.some((b) => !b.done);
+    if (!busy && p.troops >= this.cfg.maxTroops(p) * 0.8) this.idleTurns++; else this.idleTurns = 0;
+    const restless = this.idleTurns >= IDLE_TURNS_LIMIT[this.diffIndex];
+    if (this.finishCollapsing()) return true;
+    if (this.betrayOutgrownAlly(restless)) return true;
+    if (restless && this.breakStalemate()) return true;
+    return false;
+  }
+  startRush(o) {
+    const g = this.game, p = this.p;
+    if (this.difficulty !== Difficulty.EASY && !p.isFriendly(o) && !p.warsDeclared.has(o.smallID) && o.type !== PlayerType.BOT) g.declareWar(p, o);
+    this.rush = { target: o.smallID, until: g.tick + RUSH_TICKS };
+    this.currentEnemy = o;
+    this.idleTurns = 0;
+    return this.rushWave(o, true);
+  }
+  // One wave of a rush: a big share of the army, minus what we need to hold off anyone else next door.
+  rushWave(o, first = false) {
+    const g = this.game, p = this.p;
+    if (!g.canAttack(p, o)) return false;
+    const { players: nb } = g.neighborsOf(p);
+    let guard = 0;
+    for (const n of nb) if (n !== o && g.hostile(p, n) && n.type !== PlayerType.BOT) guard = Math.max(guard, n.troops * 0.5);
+    const share = Math.min(0.85, RUSH_WAVE_SHARE[this.diffIndex] * (first ? 1.15 : 1));
+    const troops = Math.floor(Math.min(p.troops * share, p.troops - guard));
+    if (troops < Math.max(1000, o.troops * 0.15)) return false;
+    this.currentEnemy = o;
+    if (nb.includes(o)) return g.sendAttack(p, o, troops, null, this.chooseFocus(o)) !== null;
+    // not next door: land on their coast
+    if (g.settings.disableBoats || p.boats.length >= this.cfg.boatMaxNumber(p) || g.pathBudget-- <= 0) return false;
+    const shore = this.shoreTiles(o, 60);
+    if (!shore.length) return false;
+    return g.sendBoat(p, this.rng.pick(shore), Math.floor(troops * 0.6), AI_BOAT_BUDGET) !== null;
+  }
+  // A hostile neighbour that is falling apart gets finished, not left to recover.
+  finishCollapsing() {
+    const g = this.game, p = this.p;
+    if (this.diffIndex === 0 && !this.rng.chance(3)) return false;
+    const cw = CHOICE_WORDS.finish;
+    let best = null, bestScore = 0;
+    for (const o of g.neighborsOf(p).players) {
+      if (!g.hostile(p, o) || o.type === PlayerType.BOT || !g.canAttack(p, o)) continue;
+      if (o.troops >= p.troops * 0.3) continue;
+      const falling = this.believes(o.smallID, 'collapsing') || this.believes(o.smallID, 'shrinking') || this.believes(o.smallID, 'troops_depleted') || o.troops < p.troops * 0.12;
+      if (!falling) continue;
+      const score = 1 + this.wordSum(o.smallID, cw.want) - 0.5 * this.wordSum(o.smallID, cw.avoid);
+      if (score > bestScore) { bestScore = score; best = o; }
+    }
+    return best ? this.startRush(best) : false;
+  }
+  // An alliance is a tool. Once we are far stronger than an ally next door, nobody dangerous is left for
+  // it to help with, and its land is where we would grow, it is broken on the spot and the ally rushed.
+  // Breaking it marks us a traitor for a while (weaker defence), so only a nation with nobody dangerous
+  // at its back does it.
+  betrayOutgrownAlly(restless) {
+    const g = this.game, p = this.p;
+    if (g.tick < EARLY_GAME_TICKS || g.tick < this.betrayCheckAfter || p.isTraitor() || this.posture === 'turtle') return false;
+    this.betrayCheckAfter = g.tick + 100;
+    const { players: nb, touchesNeutral } = g.neighborsOf(p);
+    const myPow = g.attackPower(p);
+    for (const o of nb) if (g.hostile(p, o) && o.type !== PlayerType.BOT && g.attackPower(o) > myPow * 0.6) return false;
+    const boxedIn = !touchesNeutral && !nb.some((o) => g.hostile(p, o) && o.troops < p.troops * 0.8);
+    const need = OUTGROWN_RATIO[this.diffIndex] * (boxedIn || restless ? 0.75 : 1);
+    const cw = CHOICE_WORDS.finish;
+    let best = null, bestScore = 0;
+    for (const a of nb) {
+      if (!p.allies.has(a.id) || a.type === PlayerType.BOT || !a.alive || g.sameTeam(p, a)) continue;
+      const ratio = myPow / Math.max(1, g.attackPower(a));
+      if (ratio < need || p.troops < a.troops * 1.3) continue;
+      // an ally still holding off someone dangerous for us keeps its purpose
+      if (a.incomingAttacks.some((x) => !x.done && x.attacker !== p && g.hostile(p, x.attacker) && x.attacker.troops > p.troops * 0.5)) continue;
+      const score = ratio * (1 + 0.25 * this.wordSum(a.smallID, cw.want)) / (1 + 0.3 * this.wordSum(a.smallID, cw.avoid)) * (0.5 + a.numTiles / Math.max(1, p.numTiles));
+      if (score > bestScore) { bestScore = score; best = a; }
+    }
+    if (!best) return false;
+    g.breakAlliance(p, best);
+    return this.startRush(best);
+  }
+  // Sat on a full army for too long: hit the weakest non-ally we can reach, by land or by sea.
+  breakStalemate() {
+    const g = this.game, p = this.p;
+    const nb = g.neighborsOf(p).players.filter((o) => g.hostile(p, o) && g.canAttack(p, o)).sort((a, b) => a.troops - b.troops);
+    const nextDoor = nb.find((o) => o.troops < p.troops * 1.2);
+    if (nextDoor) { this.idleTurns = 0; return nextDoor.type === PlayerType.BOT ? this.sendAttack(nextDoor) : this.startRush(nextDoor); }
+    const far = g.players.filter((o) => o.alive && o !== p && o.type !== PlayerType.BOT && g.hostile(p, o) && g.canAttack(p, o) && o.troops < p.troops * 0.8)
+      .sort((a, b) => a.troops - b.troops);
+    if (far.length) return this.startRush(far[0]);
+    return false;
   }
   // Allies fighting someone next to us: lend a hand, and if they are winning, join the land grab.
   assistAllies() {
@@ -525,6 +644,12 @@ class NationAI {
   // Where we'd like expansion pulled: toward the current enemy, else toward the largest neutral area.
   chooseFocus(target) {
     const g = this.game, p = this.p;
+    // a mech leading the way into that nation is where the attack should go: it is the spearhead
+    if (target) {
+      const lead = p.mechs.find((m) => !m.done && !m.onWater && g.owner[g.tileAt(m.x, m.y)] === target.smallID)
+        || p.mechs.find((m) => !m.done && m.mode === 'assault' && m.orderTarget === target.smallID);
+      if (lead) return g.tileAt(lead.x, lead.y);
+    }
     if (target) { const c = g.centroid(target); if (c) return g.ref(Math.round(c.x), Math.round(c.y)); }
     // neutral: sample border tiles' outward neighbours, pick the direction with the most neutral land in a 25-tile probe
     let bestT = -1, bestScore = -1;
@@ -552,6 +677,7 @@ class NationAI {
     const friends = neighbors.filter((o) => p.isFriendly(o));
     const enemies = neighbors.filter((o) => !p.isFriendly(o));
     this.manageWars();
+    if (this.finishMoves()) return;
     if (this.assistAllies()) return;
     if (touchesNeutral && this.sendAttack(null)) return;
     // Nothing left to walk into: look for an empty landmass worth shipping troops to.
@@ -751,7 +877,10 @@ class NationAI {
       let accept;
       if (this.wordSum(sm, cw.refuse) >= 1) accept = false;          // traitors, attackers, betrayers
       else if (g.tick < EARLY_GAME_TICKS) accept = p.relation(from) > -20 && !this.rng.chance(5);   // early: take the trade bonus
-      else accept = p.relation(from) > -20 && (from.troops > p.troops * 0.5 || this.wordSum(sm, cw.want) >= 1.5 || this.rng.chance(2)) && !this.rng.chance(4);
+      // later on an alliance has to be worth something: a partner that can hold its own, a common enemy,
+      // or protection while we are under pressure. A weak nation asking a strong one is asking to be eaten.
+      else accept = p.relation(from) > -20 && !this.rush && (from.troops > p.troops * 0.6 || this.wordSum(sm, cw.want) >= 2 || this.posture === 'turtle')
+        && from.troops * OUTGROWN_RATIO[this.diffIndex] >= p.troops && !this.rng.chance(4);
       g.replyAlliance(p, from, accept);
     }
   }
@@ -924,7 +1053,7 @@ class NationAI {
     // Airport: a late, enormous purchase, and the answer to a SAM wall. If the rivals we care about sit
     // behind SAMs (or their SAMs have already shot our missiles down), stop spending on small things and
     // save for one; then it goes deep inside our land, and maybeAirlift aims the drops at their launchers.
-    if (!easy && !p.unitsOf(UnitType.AIRPORT).length && !g.settings.disableBoats) {
+    if (!easy && !p.unitsOf(UnitType.AIRPORT).length && !g.unitDisabled('airport')) {
       const stoppedUs = [...this.samWall.values()].reduce((a, b) => a + b, 0);
       const turtled = g.players.some((o) => o !== p && o.alive && g.hostile(p, o) && o.numTiles > 300
         && (o.unitsOf(UnitType.SAM).length >= 2 || o.warships.filter((w) => !w.done).length >= 3));
@@ -1122,7 +1251,7 @@ class NationAI {
   // ---- navy --------------------------------------------------------------------------
   handleNavy() {
     const g = this.game, p = this.p;
-    if (this.difficulty === Difficulty.EASY || g.settings.disableBoats) return;
+    if (this.difficulty === Difficulty.EASY || g.unitDisabled('warship')) return;
     const ports = p.completedUnitsOf(UnitType.PORT);
     if (!ports.length) return;
     const reserve = p.unitsOf(UnitType.SILO).length ? this.cfg.nukeCost(NukeType.ATOM, p) : 0;
@@ -1216,8 +1345,12 @@ class NationAI {
       raidTarget = overseas[0] || null;
     }
 
-    // ---- build ----
-    if (facs.length && live.length < want) {
+    // ---- build: only when a mech would earn its price ----
+    // guard duty (we are being hit hard, or someone next door fields mechs), a spearhead for a war or a
+    // rush we are committed to, or a doctrine built around them. Otherwise the gold is better elsewhere.
+    const beenHit = [...this.grudge.values()].some((v) => v > 30);
+    const useful = pressed || beenHit || this.posture === 'war' || !!this.rush || p.warsDeclared.size > 0 || this.wantMechs > 0 || this.threat.mechs > 0.5;
+    if (facs.length && live.length < want && useful) {
       const reserve = p.unitsOf(UnitType.SILO).length ? this.cfg.nukeCost(NukeType.ATOM, p) : 0;
       const cost = this.cfg.unitCost(UnitType.MECH, p.mechs.length, p);
       if (p.gold >= cost + reserve * 0.5) {
@@ -1276,13 +1409,38 @@ class NationAI {
       const raiders = Math.max(1, Math.floor(pool.length / 2));
       for (let k = 0; k < raiders; k++) { const m = take(healthy); if (m) give(m, 'assault', raidTarget.smallID); }
     }
-    // 5 and 6
+    // 5. lead the rush / the war we declared: the mech is the spearhead our attacks aim through
+    const rushTarget = this.rush ? g.playersBySmall[this.rush.target] : null;
+    if (rushTarget && rushTarget.alive && g.hostile(p, rushTarget)) {
+      for (let k = pool.length - 1; k >= 0; k--) { if (healthy(pool[k])) { give(pool[k], 'assault', rushTarget.smallID); pool.splice(k, 1); } }
+    }
+    // 6. otherwise guard: sit behind the most threatened stretch and answer whatever comes
     for (const m of pool) {
       if (!healthy(m)) { give(m, 'defend'); continue; }
-      if (enemy && g.hostile(p, enemy) && (tanky || this.hardOrWorse || p.troops > enemy.troops)) give(m, 'assault', enemy.smallID);
+      const warTarget = enemy && g.hostile(p, enemy) && (p.warsDeclared.has(enemy.smallID) || this.posture === 'war');
+      if (warTarget && (tanky || this.hardOrWorse || p.troops > enemy.troops)) give(m, 'assault', enemy.smallID);
       else if (raidTarget && crossesWater) give(m, 'assault', raidTarget.smallID);
-      else give(m, 'roam');
+      else if (m.mode !== 'defend') { const post = this.tileNearThreat(); if (post !== null && post >= 0) give(m, 'defend', 0, post); else give(m, 'defend'); }
     }
+  }
+  // An enemy mech inside our country gets dealt with. A battery already on it is enough; otherwise send a
+  // swarm big enough to pull it down, if we can spare the troops without opening ourselves up.
+  counterMechs() {
+    const g = this.game, p = this.p;
+    if (this.difficulty === Difficulty.EASY || g.tick < (this.swarmAfter || 0)) return false;
+    const per = this.cfg.swarmDamagePerTroop();
+    for (const m of g.mechs) {
+      if (m.done || m.onWater || !g.hostile(p, m.owner)) continue;
+      const inside = g.owner[g.tileAt(m.x, m.y)] === p.smallID || (m.mode === 'assault' && m.orderTarget === p.smallID && this.nearOurLand(m.x, m.y, 20));
+      if (!inside) continue;
+      if (g.swarms.some((sw) => !sw.done && sw.owner === p && sw.target === m)) continue;
+      const guns = p.completedUnitsOf(UnitType.ARTILLERY).some((u) => g.distXY(g.x(u.tile), g.y(u.tile), m.x, m.y) <= this.cfg.artilleryRange(p));
+      if (guns && m.hp < m.maxHp * 0.6) continue;
+      const need = Math.ceil((m.hp / per) * 1.3);
+      if (need > p.troops * (this.posture === 'turtle' ? 0.35 : 0.5)) continue;
+      if (g.swarmMech(p, m.id, need).ok) { this.swarmAfter = g.tick + 60; return true; }
+    }
+    return false;
   }
   nearOurLand(x, y, r) {
     const g = this.game, p = this.p;

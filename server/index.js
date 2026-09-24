@@ -264,6 +264,7 @@ class Lobby {
     const ratio = Math.min(1, Math.max(0.01, Number(m.ratio) || 0.2));
     switch (m.t) {
       case 'spawn':
+        if (g.settings.randomSpawn) { c.send({ t: 'toast', msg: 'Random spawn is on - you have been placed for you' }); break; }
         if (tile !== null && !g.spawn(p, tile)) c.send({ t: 'toast', msg: 'Cannot spawn there' });
         break;
       case 'attack': {
@@ -320,6 +321,11 @@ class Lobby {
         else if (unit === 'submarine') r = g.buildSub(p, tile);
         else if (unit === 'bomber') r = g.launchBomber(p, tile);
         else r = g.build(p, unit, tile);
+        if (!r.ok) c.send({ t: 'toast', msg: r.reason });
+        break;
+      }
+      case 'swarm': {
+        const r = g.swarmMech(p, Number(m.id), Number(m.troops));
         if (!r.ok) c.send({ t: 'toast', msg: r.reason });
         break;
       }
@@ -381,7 +387,7 @@ class Lobby {
       }
       case 'ally': {
         const o = g.playersBySmall[Number(m.p)];
-        if (o && o !== p) { if (!g.requestAlliance(p, o)) c.send({ t: 'toast', msg: 'Alliance request not possible' }); }
+        if (o && o !== p) { if (!g.requestAlliance(p, o)) c.send({ t: 'toast', msg: g.isTeamGame() ? 'Team games: your team is your alliance' : 'Alliance request not possible' }); }
         break;
       }
       case 'allyReply': {

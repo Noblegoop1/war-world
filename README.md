@@ -51,9 +51,11 @@ Open <http://localhost:3000>, pick a name, **Create game**, choose a map, **Star
     like a truck: **25% of a Mech's health** or **10% of a warship's** per shell. It targets enemy
     Mechs first (this is the answer to a Mech parked on your border), then ships, then whichever
     attack is closest. It never takes ground.
-  * **Airport** — one per nation and enormously expensive. It flies **Airships**: each carries 5% of
-    your troops (10% with Strategic Airlift) over SAMs, warships and coastal defenses and drops them
-    on any land tile in range. SAMs cannot touch one and warships cannot reach one. The counters: a nation with
+  * **Airport** — one per nation and enormously expensive. It lays **roads** to your Cities within 110
+    tiles (220 with Strategic Airlift), the way a Factory lays rail, and every City on those roads becomes
+    an airfield. It flies **Airships**: each carries 5% of your troops (10% with Strategic Airlift) over
+    SAMs, warships and coastal defenses and drops them on **any land tile on the map**, taking off from
+    whichever airfield is closest to the target. SAMs cannot touch one and warships cannot reach one. The counters: a nation with
     **Interceptor Screen** gets a 45% shot at each airship that passes within range of its SAMs or its
     Airport, and **Airborne Mechs** shoot them down. Max 3 in the air, each costing more than the last. The
     catch is that your own SAMs cannot sit within 70 tiles of your Airport unless you research
@@ -71,7 +73,25 @@ Open <http://localhost:3000>, pick a name, **Create game**, choose a map, **Star
   raze it. AI nations run a **choke-point analysis** (narrowest cut between the threat and their
   interior, valued by threat x front length / cut length) before spending on a wall.
 * **Mechs** (key **9**) — built at a **level-2+ Factory** (the highest-level one, or one you pick
-  via its radial). Cost **2M+ gold, escalating**. Not autonomous: like a warship you click where
+  via its radial). Cost **2M+ gold, escalating**. What they are for, in short:
+  * **Guard (the default order).** A mech waits at its post; the moment an attack hits your land it
+    drives to that front on your own roads (about 12 tiles a second at home, so it arrives in seconds),
+    and there it **shells the attacking army itself** — every 2s a shell takes 3% of that attack plus
+    5,000 troops — while **nothing within 6 tiles of it can be taken** as long as it stands: attackers
+    grinding at that pocket chip the mech and bleed for it. When the attack is over it drives back.
+  * **Assault (the spearhead).** Point it at a nation you are attacking and it walks at the head of
+    your push. Your attacks within 40 tiles of it take ground **twice as fast for half the losses**, each
+    of its shells also takes 2% of that nation's army, and the ground it stomps becomes **yours** (a
+    bridgehead your attack pours through). Without an attack of yours on that nation, stomped ground is
+    only flattened to empty land.
+  * **Water.** Any mech can cross the sea on a slow barge (it can't fire while afloat and warships can
+    shell it); water doctrines let it cross freely and fight at sea.
+  * **Killing one.** Right-click an enemy mech → **Swarm**: troops run straight at it and each one that
+    arrives takes 0.03 health off (about 1.3M troops for a fresh level-2 mech; its guns thin the swarm
+    on the way in). Artillery, bombers, nukes and warships (at sea) work too. The AI swarms mechs that
+    walk into its land and only builds mechs when one would pay: to guard against heavy attacks, or to
+    lead a war or a rush.
+  The older detail: Not autonomous: like a warship you click where
   it should **patrol**; it walks there (slowly — 0.35 tiles/tick, land-only unless you research
   Amphibious Mech) and circles the spot. Every cannon cooldown it fires a shell at the closest
   hostile mech, structure or dense land patch in range (12 tiles at L2, +3 per level), and every
@@ -106,12 +126,17 @@ Open <http://localhost:3000>, pick a name, **Create game**, choose a map, **Star
   everyone else.
   There are **42 doctrines**. Most are stat changes; several unlock units or change how things work,
   including four answers to SAM umbrellas:
-  * **Cluster Munitions** — the Cluster Strike: eight small missiles at once. A SAM stops one missile
-    per reload, so against three SAMs five of the eight land.
+  * **Cluster Munitions** — the Cluster Strike: eight small missiles, ripple-fired a moment apart so
+    they fly as a stream on one arc, then **bloom apart** over the target to eight impact points. A SAM
+    stops one missile per reload, so against three SAMs five of the eight land.
   * **Decoy Warheads** — a SAM that engages your missile has a 55% chance to hit a decoy instead.
   * **Hypersonic Missiles** — twice the speed, and a SAM that scores still reloads 3× slower.
   * **SEAD Doctrine** — airship drops wreck every enemy SAM within 15 tiles; bombers sent at SAMs
     can't be shot down.
+  Each multi-missile weapon flies differently so you can read it at a glance: the **MIRV** bus climbs
+  to the top of its arc, flashes, and releases five warheads one after another that start slow and
+  speed up as they fall; a **submarine volley** is one missile that climbs out of the sea, splits into
+  three that hang and drop for a moment, then each lights up and races onto its own target.
   And for mech nations: **Amphibious Mechs** cross water, take 95% of a warship's health per shell
   and spot submarines within 30 tiles; **Airborne Mechs** move twice as fast over land and water and
   shoot down airships, at the cost of 80% of their damage against everything else.
@@ -132,6 +157,14 @@ Open <http://localhost:3000>, pick a name, **Create game**, choose a map, **Star
   *nuked_me* against *strong_army* and *busy* — and only strikes back when the odds are good. What
   the objective words say about a nation is computed once and shared by every AI, so the whole thing
   costs a few milliseconds a tick.
+  **The finish.** A winning AI keeps its foot down. An alliance is a tool: once a nation is far
+  stronger than an ally next door (×4 ATK POWER on Easy down to ×1.5 on Impossible, a quarter less if
+  it has nowhere else to grow), nobody dangerous is left for that ally to help with, and nobody strong
+  is at its own back, it **breaks the alliance on the spot and rushes the former ally** with waves of
+  its army, declaring war for the troop bonus (and wearing the traitor debuff for it). It also finishes
+  off neighbours that are collapsing, and a nation that sits on a full army with nothing to do for a
+  few turns forces a decision: the weakest non-ally it can reach, by land or by sea. Late in the game it
+  no longer accepts alliances from nations it could simply eat.
   Allied AIs **tag-team**: if an ally is fighting a nation the AI can reach, it sends a little help;
   if the ally is clearly winning it joins the rush to grab the land. The AI **allies more eagerly in
   the first five minutes**, declares war on the neighbour its words rate most worth it when it is
@@ -269,10 +302,28 @@ sessions. Choose a region close to your players.
 
 ## Settings
 
-Map, map size (normal/compact), random-map seed, AI nation count, bot count, AI difficulty
-(Easy→Impossible scales start troops, max troops, growth, reaction speed and targeting smarts),
-spawn-phase length, game speed (0.5×–3×), % of land to win, starting gold, and toggles for
-nukes/boats and infinite gold/troops/instant-build sandbox play.
+The lobby's options page works like OpenFront's host screen: cards and switches, host-only.
+
+* **Map** — a card per map. **Difficulty** — Easy to Impossible (start troops, growth, reaction speed,
+  targeting, how often the AI looks at its rivals and how early it strikes).
+* **Mode** — **Free for all**, **Teams**, or **Zombie** (shown as "coming next"). Teams can be 2–7 teams,
+  Duos / Trios / Quads (teams of 2, 3, 4) or **Humans vs Nations**. Humans are spread across teams
+  first, then nations fill in; tribes stay on their own. Teammates are permanent allies (no attacking,
+  nothing to break), there are no alliances across teams, members share their team's colour, the
+  leaderboard shows team standings on top, and a team wins when its members together hold the land needed.
+* **Options** — Tribes and Nations sliders (or every nation the map defines), Instant build,
+  **Random spawn** (everyone is placed for them), Infinite gold / troops, Compact map,
+  **Water nukes** (bombs can be aimed at the sea — how you hit a fleet), and the **Doomsday clock**:
+  from 10 minutes in (or halfway through a set game length) a bar of land share rises 1% every 30s;
+  anyone under it who isn't the leader gets a minute's warning, then loses troops, then land, until gone,
+  so games always end. Checkbox + number options: **Game length** (when time runs out the biggest side
+  wins), **Gold multiplier**, **Starting gold** (millions), **Alliance duration** (alliances end after that
+  long; ask again to renew) and **Overtime after** (the land needed to win then drops 1% every 30s).
+* **Disable units** — switch off any of City, Defense Post, Port, Warship, Boat, Missile Silo, SAM,
+  Atom / Hydrogen bomb, MIRV, Factory, Research Lab, Mech, Wall, Artillery, Repair Yard, Airport or
+  Submarine. They vanish from the build bar, the server refuses them, and doctrines for them are never offered.
+* **Lobby & advanced** — game name, public lobby, max humans, random-map seed, spawn-phase length,
+  game speed and % of land to win.
 
 ## Project layout
 
@@ -297,6 +348,7 @@ server/game/ai.js      Nation AI (research-driven; factories, mechs + standing o
                        colonising empty landmasses, choke-point walls, nukes, bombers, wars,
                        word memory of every rival) and bot AI
 server/game/intel.js   The AI vocabulary: what a nation looks like from outside, as words
+server/game/modes.js   Teams, random spawn, doomsday clock, game length / overtime, alliance duration, disabled units
 public/                Client: menu/lobby UI, canvas renderer, radial menu, research picker, input
 public/assets/         OpenFront icons & sprites (CC BY-SA 4.0)
 server/maps/           Five bundled OpenFront maps (CC BY-SA 4.0)
