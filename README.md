@@ -35,7 +35,8 @@ Open <http://localhost:3000>, pick a name, **Create game**, choose a map, **Star
 * **Build** (keys **1-0** or the bottom bar, then click a tile):
   * **City** — +250K max troops. Build on it again to upgrade. Joins the rail network when a
     Factory is in range.
-  * **Port** — sea coast only. Sends trade ships to other players' ports; launches Warships.
+  * **Port** — on the sea coast (a click up to 4 tiles inland snaps to the nearest coast tile of yours).
+    Sends trade ships to other players' ports; launches Warships.
   * **Factory** — becomes a train station and lays rail to every City / Port / Lab / Factory within
     110 tiles (rail also crosses water as bridges, and connects to *other nations'* stations).
     Trains spawn at factories and pay gold on arrival — 10K to your own station, 25K to another
@@ -202,7 +203,7 @@ Open <http://localhost:3000>, pick a name, **Create game**, choose a map, **Star
   raise these). **Every level-3 Port adds one Warship and one Submarine to the cap, and every level-3
   Factory adds one Mech**; a level-4 building (Heavy Industry) adds one more. Levelling production is
   how a navy or mech corps grows.
-* **Declaring war** (radial on their land, or the nation card) — your attacks on that nation carry
+* **Declaring war** (radial on their land, or the nation card; it happens at once, no confirmation) — your attacks on that nation carry
   **15% more troops**, but your passive income drops **20%** while any war you declared lasts. A war
   runs at least 60 seconds before you can **make peace**, and allying the nation ends it. The target
   is told, and the nation card shows who is at war with whom.
@@ -232,41 +233,45 @@ Open <http://localhost:3000>, pick a name, **Create game**, choose a map, **Star
   can donate troops/gold, and earn 75% more from trade ships sent to each other. Breaking one marks you a **traitor** for 30s (weaker defense). Nuking
   an ally breaks the alliance.
 * **Zombie mode** — pick it on the options page, with four horde strengths: **Shamblers**,
-  **Outbreak**, **Pandemic**, **Extinction** (2–5 hives, 25–40 minutes to survive). It borrows from zombie
-  games: patient-zero hives in the wilderness (Warcraft III zombie maps, Plague Inc), announced great waves
-  and a final wave from every direction (They Are Billions), noise that draws the horde, infected ships
-  that carry the plague overseas (Plague Inc), and scavenging infected land (Infection Free Zone).
-  * **The calm** — 1.5 to 3 minutes after the spawn to expand, wall up and get a lab going.
-  * **The outbreak** — hives open in the wilderness, as far from everyone as possible and spread over the
-    continents people live on. **The Horde** is a player of its own: it spreads like an attack that belongs to
-    nobody, into empty land and into every living neighbour. It is sized against the living (the stronger
-    the world, the bigger the horde), and **troops that die fighting it rise and join it**.
-  * **Creep** — wherever the living touch zombie land, the infection creeps over the border a tile at a
-    time. Walls, defense posts, a mech's hold zone and (cure step 1) your cities' surroundings stop it.
-    **Zombies barely scratch walls**, so walling up works.
-  * **Across the sea** — a transport or trade ship leaving from near zombie land may be infected (ringed in
-    green) and starts a new outbreak where it lands; the horde sends rafts at the nearest living coast
-    (warships sink them); living hives send spores to other continents every few minutes. Nowhere is safe for
-    long, which is why the plague has to be fought, not just waited out.
-  * **Great waves** — every few minutes the horde picks a nation (bombs and big battles make noise and draw
-    it), announces a great wave 30 seconds ahead (a green ring and countdown on the map) and throws a flood of
-    the dead at it. A minute before the clock runs out the final wave comes from every direction.
-  * **Taking it back** — every zombie tile you reclaim pays salvage gold and gives a **sample**; burning a
-    hive (taking its tile) gives 150 samples and 400K gold and slows the horde. Ground near a living hive is
-    much harder to take.
-  * **The cure** — three steps researched in your labs, alongside your doctrines (3, 5 and 8 minutes at a
-    level-1 lab; steps 2 and 3 need samples). Step 1: creep can't take ground near your cities and fewer of
-    your dead rise. Step 2: your dead don't rise at all and your attacks on the horde lose far fewer troops.
-    Step 3: **the first nation to finish it cures the world.**
-  * **The end** — when the horde is cured, wiped out, or the clock runs out, its land rots back to empty
-    ground and there are 5 minutes of land rush. Two results: **everyone still standing survived**, and the
-    **strongest survivor** (land first, then troops, gold, buildings, and what it did against the plague;
-    +1500 for curing the world) wins outright. If nobody survives, the dead inherit the earth.
+  **Outbreak**, **Pandemic**, **Extinction** (2–5 hives, 25–40 minutes to survive). Ideas from zombie
+  games: patient-zero hives (Warcraft III zombie maps, Plague Inc), announced great waves and a final wave
+  from every direction (They Are Billions), noise that draws the horde, and scavenging infected land
+  (Infection Free Zone).
+  * **The calm** — 1.5 to 3 minutes after the spawn to expand, wall up, and get SAMs and a lab going.
+  * **The outbreak** — hives break out on the continents people live on: in the wilds if there are any,
+    otherwise deep in a nation's hinterland, far from its capital. **The Horde** is a player of its own.
+  * **A parasite** — it grows **0.5% of itself every second** while it touches living nations (half that
+    when it touches nobody; each living hive adds a little), and it can never outgrow the living (a cap
+    sized to every living army together). **Attacking it works — you do push it back — but three quarters of
+    the troops you lose rise as zombies**; troops it kills on your own land rise too (a smaller share).
+  * **Bombs** — nukes and bomber strikes (aim a bomber at zombie land) kill the dead without feeding it: a
+    nuke kills a share of the horde by how much of it the blast covers. But every bomb **enrages** it: a
+    stacking bonus (its attacks lose fewer troops and move faster) that fades one stack every 90 seconds.
+  * **Walls** — **zombies are ten times weaker against walls than troops**. Its infection creeps over
+    borders a tile at a time; walls, defense posts, a mech's hold zone and the cure stop the creep.
+  * **Across the sea** — its hives release **spore clouds** that drift slowly toward living people on
+    other continents (a green cloud with a dashed line to where it will land). Where one lands a new hive
+    grows. **SAMs shoot spore clouds down** (and airborne mechs), so anti-air keeps the plague off your shores.
+  * **Great waves** — every few minutes the horde picks a nation (bombs and big battles make noise that
+    draws it), announces a great wave 30 seconds ahead and throws a flood of the dead at it. A minute before
+    the clock runs out the final wave comes from every direction.
+  * **Samples and the cure** — killing zombies (1 sample per 3,000, on your walls, in your attacks, with your
+    bombs) and taking back their land (1 per tile, plus salvage gold; a burned hive gives 150) yields samples.
+    The **cure is per nation**, three quick steps in your labs alongside your doctrines (2, 3 and 4 minutes at a
+    level-1 lab; steps 2 and 3 need a few samples): step 1 — fewer of your dead rise and the creep can't take
+    ground near your cities; step 2 — half as many rise and your attacks on the horde lose 20% fewer;
+    step 3 — **immune**: none of your dead rise, the creep can't touch you and the horde can't feed on you.
+    There is no switch that cures the world: a world of immune survivors starves the horde out.
+  * **The end** — when the horde is wiped out or the clock runs out, its land rots back to empty ground and
+    there are 5 minutes of land rush. **Everyone still standing survived**, and the **strongest survivor**
+    (land first, then troops, gold, buildings, cure steps and samples; +600 for immunity) wins outright.
+    If nobody survives, the dead inherit the earth.
   * **The AI** plays a different game while the dead walk: it allies with anyone who hasn't betrayed it,
-    doesn't betray and leaves other nations alone unless attacked, walls and posts the side facing the horde
-    first, pushes into zombie land for samples and hives when it has the troops, researches the cure before
-    any doctrine, drops its bombs on hives, sends troops to allies being overrun and builds warships against
-    rafts. After the plague it goes back to its usual self — the land rush is on.
+    doesn't betray and leaves other nations alone unless attacked, walls and posts the side facing the
+    horde first, builds SAMs against spores, researches the cure before any doctrine, drops its bombs on
+    hives (the small ones once the horde is enraged), sends troops to allies being overrun, and only pushes
+    into zombie land when it pays — once cured, when the horde is clearly weaker, to burn a nearby hive, or
+    when it is under attack. After the plague it goes back to its usual self — the land rush is on.
 * **Win** by owning 80% of the land (configurable). Any player squeezed under 100 tiles is
   conquered outright — the attacker takes their land and gold.
 
@@ -360,8 +365,12 @@ sessions. Choose a region close to your players.
 
 The lobby's options page works like OpenFront's host screen: cards and switches, host-only.
 
-* **Map** — a card per map. **Difficulty** — Easy to Impossible (start troops, growth, reaction speed,
-  targeting, how often the AI looks at its rivals and how early it strikes).
+* **Map** — a card per map. **Difficulty** — Easy to Impossible. Troop numbers follow OpenFront's (nation
+  troop caps ×0.5 / ×0.7 / ×0.85 / ×1.05 of a human's, trimmed a little at the top because our nations also
+  get doctrines, mechs and a smarter economy); the harder the AI, the more often it looks at its rivals, the
+  sooner it betrays an ally it has far outgrown, and the harder it rushes. Land counts for more toward
+  everyone's troop cap than in OpenFront (1,300 per tile^0.6 instead of 1,000), so a wide nation can field an
+  army to match one that stacked cities on a small patch.
 * **Mode** — **Free for all**, **Teams**, or **Zombie** (with its own horde-strength picker). Teams can be 2–7 teams,
   Duos / Trios / Quads (teams of 2, 3, 4) or **Humans vs Nations**. Humans are spread across teams
   first, then nations fill in; tribes stay on their own. Teammates are permanent allies (no attacking,

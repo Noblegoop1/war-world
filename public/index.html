@@ -53,7 +53,7 @@
         <li><kbd>A</kbd> attack under cursor &middot; <kbd>B</kbd> boat under cursor &middot; <kbd>R</kbd> retaliate against your latest attacker &middot; <kbd>C</kbd> center on you &middot; <kbd>N</kbd>/<kbd>H</kbd> nukes &middot; <kbd>Enter</kbd> chat &middot; <kbd>Esc</kbd> close.</li>
         <li><b>Walls + posts</b>: a wall that starts or ends on your Defense Post and stays within 50 tiles is 30% cheaper, and walls inside a post's range are harder to break. The gold rings show each post's reach while you place a post or draw a wall.</li>
         <li><b>Sharing research</b>: on an ally's card, ask to borrow one of their doctrines or lend them one of yours (one each way at a time; the lender can take it back any time).</li>
-        <li><b>Zombie mode</b>: survive the horde. Hives open in the wilds after a short calm; the dead spread, creep over borders and rise from your fallen. Walls, defense posts and mechs hold them; infected ships and rafts carry them overseas; great waves are announced 30s ahead. Take zombie land back for salvage and samples, research the 3-step cure, and be the strongest nation still standing at the end.</li>
+        <li><b>Zombie mode</b>: survive the horde. Hives break out after a short calm; the horde is a parasite that grows 0.5% a second while it touches you and never outgrows the living. Attacking it pushes it back, but 3/4 of the troops you lose rise as zombies - nukes and bombers kill it cleanly but enrage it. Zombies are 10x weaker against walls; SAMs shoot down the spore clouds it sends across the sea. Kill zombies for samples, research the 3-step cure to become immune, and be the strongest nation still standing at the end.</li>
         <li><b>Modes</b>: Free for all or Teams (2&ndash;7 teams, Duos/Trios/Quads, Humans vs Nations). Teammates are permanent allies and win together. The host can also switch on Random spawn, Water nukes, a Doomsday clock, a game length, overtime, a gold multiplier, alliance duration, and switch off any unit.</li>
         <li><b>Win</b> by owning 80% of the land (configurable; in Teams your team's land counts together). A player squeezed under 100 tiles is conquered outright.</li>
       </ul>
@@ -110,16 +110,19 @@
             <div class="opt-sub">THE HORDE</div>
             <div class="opt-grid four">
               <label class="opt-card diff zd"><input type="radio" name="zombieDifficulty" value="easy"><span class="skulls"><i class="on bio">☣</i><i class="">☣</i><i class="">☣</i><i class="">☣</i></span><span class="opt-label">SHAMBLERS</span><span class="opt-blurb">2 hives · 25 min · slow and beatable</span></label>
-              <label class="opt-card diff zd"><input type="radio" name="zombieDifficulty" value="medium"><span class="skulls"><i class="on bio">☣</i><i class="on bio">☣</i><i class="">☣</i><i class="">☣</i></span><span class="opt-label">OUTBREAK</span><span class="opt-blurb">3 hives · 30 min · spores and waves</span></label>
+              <label class="opt-card diff zd"><input type="radio" name="zombieDifficulty" value="medium"><span class="skulls"><i class="on bio">☣</i><i class="on bio">☣</i><i class="">☣</i><i class="">☣</i></span><span class="opt-label">OUTBREAK</span><span class="opt-blurb">3 hives · 30 min · spores, waves, rage</span></label>
               <label class="opt-card diff zd"><input type="radio" name="zombieDifficulty" value="hard"><span class="skulls"><i class="on bio">☣</i><i class="on bio">☣</i><i class="on bio">☣</i><i class="">☣</i></span><span class="opt-label">PANDEMIC</span><span class="opt-blurb">4 hives · 35 min · few will make it</span></label>
               <label class="opt-card diff zd"><input type="radio" name="zombieDifficulty" value="nightmare"><span class="skulls"><i class="on bio">☣</i><i class="on bio">☣</i><i class="on bio">☣</i><i class="on bio">☣</i></span><span class="opt-label">EXTINCTION</span><span class="opt-blurb">5 hives · 40 min · good luck</span></label>
             </div>
             <div class="opt-help muted small-text">
-              A minute or three after the spawn, the dead rise at hives in the wilderness and spread like an attack that belongs to nobody.
-              The living who die fighting them join them; their infection creeps over borders (walls, defense posts, mechs and the cure's first step hold it)
-              and zombies barely scratch walls. Infected ships start new outbreaks where they land, the horde sends rafts, and great waves are announced 30s before they hit.
-              Taking zombie land back pays salvage and gives samples; the <b>cure</b> is 3 steps in your labs (steps 2 and 3 need samples) and the first nation to finish it cures the world.
-              When the horde is cured, wiped out or the clock runs out, its land rots back to empty ground for 5 minutes of land rush.
+              A few minutes in, hives break out on the continents people live on - in the wilds, or deep in a nation's hinterland.
+              <b>The horde is a parasite</b>: it grows 0.5% of itself every second while it touches living nations, and it can never outgrow the living.
+              Attacking it works, but <b>three quarters of the troops you lose rise as zombies</b>; troops it kills on your land rise too.
+              <b>Nukes and bomber strikes</b> kill the dead without feeding it, but every bomb <b>enrages</b> it - a stacking attack bonus that fades slowly.
+              Its infection creeps over borders; walls, defense posts, mechs and the cure hold it, and <b>zombies are 10x weaker against walls</b>.
+              Across the sea it sends <b>spore clouds</b> from its hives that grow new hives where they land - <b>SAMs shoot them down</b>.
+              Killing zombies and taking their land back gives <b>samples</b> for the <b>cure</b>: 3 quick steps in your labs, each making you more resistant; the last makes you immune.
+              When the horde is wiped out or the clock runs out, its land rots back to empty ground for 5 minutes of land rush.
               <b>Everyone still standing survived; the strongest survivor wins outright.</b> Game length (below) overrides the survival time.
             </div>
           </div>

@@ -41,7 +41,7 @@ module.exports = {
     this.shareRequests.delete(`${borrower.id}|${lender.id}`);
     lender.updateRelation(borrower, 10); borrower.updateRelation(lender, 20);
     this.unitsChanged = true;
-    this.events.push({ k: 'shareGranted', by: lender.smallID, to: borrower.smallID, id });
+    this.events.push({ k: 'shareGranted', by: lender.smallID, rcv: borrower.smallID, id });
     if (borrower.ai && borrower.ai.onResearch) borrower.ai.onResearch();
     return { ok: true };
   },
@@ -52,7 +52,7 @@ module.exports = {
     borrower.borrowed.delete(id);
     borrower.researches.delete(id);
     this.unitsChanged = true;
-    this.events.push({ k: 'shareEnded', by: lender.smallID, to: borrower.smallID, id, reason });
+    this.events.push({ k: 'shareEnded', by: lender.smallID, rcv: borrower.smallID, id, reason });
     if (borrower.ai && borrower.ai.onResearch) borrower.ai.onResearch();
     return { ok: true };
   },
@@ -81,7 +81,7 @@ module.exports = {
     if (!r) return { ok: false, reason: 'No such request' };
     this.shareRequests.delete(key);
     if (accept) return this.lendDoctrine(lender, borrower, r.id);
-    this.events.push({ k: 'shareDenied', by: lender.smallID, to: borrower.smallID, id: r.id });
+    this.events.push({ k: 'shareDenied', by: lender.smallID, rcv: borrower.smallID, id: r.id });
     return { ok: true };
   },
   tickSharing() {

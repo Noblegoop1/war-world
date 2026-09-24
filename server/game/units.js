@@ -5,6 +5,8 @@ const { UnitType, STRUCTURE_TYPES, PlayerType, TICKS_PER_SECOND, RESEARCH, RESEA
 const { newId } = require('./ids');
 const R = require('./research').effects;
 
+const PORT_SNAP_TILES = 4;   // a port click this close to your coast snaps onto it
+
 module.exports = {
   // ---- structures ---------------------------------------------------------------
   unitAt(tile) { return this.unitByTile.get(tile) || null; },
@@ -53,7 +55,7 @@ module.exports = {
     }
     if (this.owner[tile] !== p.smallID) return { ok: false, reason: 'You must own the tile' };
     if (this.wallHp[tile]) return { ok: false, reason: 'A wall is in the way' };
-    if (type === UnitType.PORT && !this.isOceanShore(tile)) return { ok: false, reason: 'Ports must be built on the sea coast' };
+    if (type === UnitType.PORT && !this.isOceanShore(tile)) return { ok: false, reason: 'Ports must be built on (or within a few tiles of) the sea coast' };
     if (this.settings.disableNukes && (type === UnitType.SILO || type === UnitType.SAM)) return { ok: false, reason: 'Nukes are disabled' };
     if (type === UnitType.AIRPORT && p.unitsOf(UnitType.AIRPORT).length >= this.config.maxAirports()) return { ok: false, reason: 'You may only have one Airport' };
     const conflict = this.samAirportConflict(p, type, tile);
@@ -81,7 +83,27 @@ module.exports = {
     if (p.gold < cost) return { ok: false, reason: `Not enough gold (need ${Math.floor(cost).toLocaleString()})` };
     return { ok: true, cost, upgrade };
   },
+  // Ports: clicking a few tiles in from the coast is close enough - the port goes on the nearest coast
+  // tile of yours where one can be built.
+  nearestPortSpot(p, tile, r) {
+    const cx = this.x(tile), cy = this.y(tile), cands = [];
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        const x = cx + dx, y = cy + dy;
+        if (!this.valid(x, y) || dx * dx + dy * dy > r * r) continue;
+        const t = this.ref(x, y);
+        if (this.owner[t] === p.smallID && this.isOceanShore(t)) cands.push([dx * dx + dy * dy, t]);
+      }
+    }
+    cands.sort((a, b) => a[0] - b[0]);
+    for (const [, t] of cands) if (this.canBuild(p, UnitType.PORT, t).ok) return t;
+    return -1;
+  },
   build(p, type, tile) {
+    if (type === UnitType.PORT && !this.isOceanShore(tile) && !(this.unitAt(tile) && this.unitAt(tile).type === UnitType.PORT)) {
+      const alt = this.nearestPortSpot(p, tile, PORT_SNAP_TILES);
+      if (alt >= 0) tile = alt;
+    }
     const c = this.canBuild(p, type, tile);
     if (!c.ok) return c;
     p.removeGold(c.cost);

@@ -8,7 +8,7 @@ const { PlayerType } = require('./config');
 
 const HISTORY_CAP = 400;
 const RECORDED = new Set(['allied', 'betrayed', 'warDeclared', 'peace', 'death', 'nuke', 'doomed', 'win', 'shareGranted',
-  'outbreak', 'hordeWave', 'cured', 'hordeWiped', 'cureStep', 'allianceExpired', 'rebelled']);
+  'outbreak', 'hordeWave', 'hordeWiped', 'cureStep', 'immune', 'sporeLanding', 'allianceExpired', 'rebelled']);
 
 module.exports = {
   recordHistory(events) {
@@ -28,10 +28,11 @@ module.exports = {
         case 'death': a = who(e.p); if (!a) continue; b = e.by ? this.playersBySmall[e.by] : null; break;
         case 'nuke': a = who(e.by); b = e.target ? who(e.target) : null; if (!a) continue; once = 'nk' + e.by + '-' + (e.target || 0); break;
         case 'doomed': a = who(e.p); if (!a) continue; once = 'dm' + e.p; break;
-        case 'shareGranted': a = who(e.by); b = who(e.to); if (!a || !b) continue; once = 'sh' + e.by + '-' + e.to + '-' + e.id; break;
+        case 'shareGranted': a = who(e.by); b = who(e.rcv); if (!a || !b) continue; once = 'sh' + e.by + '-' + e.rcv + '-' + e.id; break;
         case 'allianceExpired': a = who(e.a); b = who(e.b); if (!a || !b) continue; break;
         case 'win': a = e.p ? this.playersBySmall[e.p] : null; break;
-        case 'cureStep': a = who(e.p); if (!a) continue; break;
+        case 'cureStep': a = who(e.p); if (!a || e.step >= 3) continue; break;
+        case 'immune': a = who(e.p); if (!a) continue; break;
         case 'rebelled': a = who(e.p); b = who(e.from); break;
         default: break;   // zombie-mode events carry their own fields
       }

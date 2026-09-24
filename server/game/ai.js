@@ -13,13 +13,13 @@ const COLONISE_COOLDOWN = 200;             // ticks between attempts
 // Minimum ticks between an AI's strategic strikes (easy -> impossible). The AI now routes around SAM
 // umbrellas and lands most of what it fires, and gold is plentiful, so the pacing has to come from here
 // rather than from missiles being wasted.
-const NUKE_CADENCE = [Infinity, 1200, 750, 500];
+const NUKE_CADENCE = [Infinity, 1800, 1200, 800];
 // Route-search budget for the AI's own boat launches (see Game.sendBoat).
 const AI_BOAT_BUDGET = { maxIter: 60000, tries: 3 };
 // ---- word memory (see rememberNations) ----
 // Chance, per turn, that the nation takes a fresh look at the others (easy -> impossible), and who it
 // looks at: easy only its neighbours, impossible every nation on the map, every turn.
-const OBSERVE_CHANCE = [0.25, 0.5, 0.75, 1];
+const OBSERVE_CHANCE = [0.12, 0.25, 0.4, 0.6];
 const WORD_FADE = 0.7;          // a word not seen again keeps this share of its confidence per look
 const WORD_FORGET = 0.15;       // below this it is forgotten
 const BELIEVE = 0.5;            // confidence at which a word counts as true
@@ -27,14 +27,14 @@ const EARLY_GAME_TICKS = 3000;  // the first five minutes: alliances are cheap a
 // ---- the finish (see finishMoves) ----
 // How much stronger (ATK POWER) than an ally a nation must be before that alliance has outlived its
 // purpose (easy -> impossible). Boxed in or restless, it settles for three quarters of this.
-const OUTGROWN_RATIO = [4, 2.6, 1.9, 1.5];
+const OUTGROWN_RATIO = [6, 3.5, 2.6, 2];
 // Turns in a row sitting on a full army with nothing to do before a nation forces a decision.
-const IDLE_TURNS_LIMIT = [14, 9, 6, 3];
+const IDLE_TURNS_LIMIT = [22, 15, 10, 6];
 const FORTIFY_INTERVAL = [Infinity, 900, 600, 400];   // ticks between fortification steps (easy -> impossible)
 const WALL_FUND_SHARE = [0, 0.15, 0.22, 0.28];        // share of income set aside for linked walls
 const ZOMBIE_PUSH_AT = [0.7, 0.6, 0.5, 0.45];   // troop share at which a nation pushes into zombie land
 const RUSH_TICKS = 1500;                        // a rush keeps sending waves for up to 2.5 minutes
-const RUSH_WAVE_SHARE = [0.4, 0.5, 0.6, 0.7];   // share of the army each wave commits
+const RUSH_WAVE_SHARE = [0.25, 0.3, 0.38, 0.45];   // share of the army each wave commits
 // Words that make each choice attractive. A choice's appeal for a nation is the sum of its words'
 // confidence in that nation's entry of our memory.
 const CHOICE_WORDS = {
@@ -218,7 +218,7 @@ class NationAI {
       else if (e.k === 'betrayed' && e.p === me) { this.betrayedBy.add(e.by); this.grudge.set(e.by, 100); }
       else if (e.k === 'nuke' && e.target === me) { this.nukedBy.add(e.by); this.grudge.set(e.by, Math.min(100, (this.grudge.get(e.by) || 0) + 40)); }
       else if (e.k === 'warDeclared' && e.on === me) this.grudge.set(e.by, Math.min(100, (this.grudge.get(e.by) || 0) + 25));
-      else if (e.k === 'raft' && e.p === me) this.raftsSeen = (this.raftsSeen || 0) + 1;
+      else if (e.k === 'sporeCloud' && e.p === me) this.sporesSeen = (this.sporesSeen || 0) + 1;
     }
   }
   // Enemy SAMs that would get a shot at a missile landing on this tile.
@@ -424,7 +424,7 @@ class NationAI {
     const { players: nb } = g.neighborsOf(p);
     let guard = 0;
     for (const n of nb) if (n !== o && g.hostile(p, n) && n.type !== PlayerType.BOT) guard = Math.max(guard, n.troops * 0.5);
-    const share = Math.min(0.85, RUSH_WAVE_SHARE[this.diffIndex] * (first ? 1.15 : 1));
+    const share = Math.min(0.6, RUSH_WAVE_SHARE[this.diffIndex] * (first ? 1.15 : 1));
     const troops = Math.floor(Math.min(p.troops * share, p.troops - guard));
     if (troops < Math.max(1000, o.troops * 0.15)) return false;
     this.currentEnemy = o;
@@ -1136,7 +1136,9 @@ class NationAI {
     const reserve = silos > 0 ? this.cfg.nukeCost(NukeType.ATOM, p) * 1.3 : 0;
     const easy = this.difficulty === Difficulty.EASY;
 
-    if (!g.settings.disableNukes && enemiesHaveSilos && sams < 1 + Math.floor(cities / 4) && p.gold >= this.cfg.unitCost(UnitType.SAM, sams, p) && !easy) {
+    // SAMs: against enemy silos, and in zombie mode against spore clouds drifting in from other shores
+    const sporeThreat = g.isZombieGame() && g.zombie && g.zombie.phase === 'outbreak' && ((this.sporesSeen || 0) > 0 || g.zombie.hives.some((hv) => hv.alive));
+    if (!g.settings.disableNukes && (enemiesHaveSilos || sporeThreat) && sams < 1 + Math.floor(cities / (sporeThreat ? 3 : 4)) && p.gold >= this.cfg.unitCost(UnitType.SAM, sams, p) && !easy) {
       const t = this.randomInnerTile();
       if (t !== null && g.build(p, UnitType.SAM, t).ok) return true;
     }
@@ -1417,7 +1419,7 @@ class NationAI {
     if (!ports.length) return;
     const reserve = p.unitsOf(UnitType.SILO).length ? this.cfg.nukeCost(NukeType.ATOM, p) : 0;
     const enemyShipsNear = g.warships.some((w) => !w.done && g.hostile(p, w.owner) && ports.some((u) => g.distXY(g.x(u.tile), g.y(u.tile), w.x, w.y) < 150));
-    const wantW = Math.min(this.cfg.warshipCap(p), (this.hardOrWorse ? 1 : 0) + this.wantWarships + (enemyShipsNear ? 2 : 0) + (p.boats.length ? 1 : 0) + (this.raftsSeen ? 2 : 0));
+    const wantW = Math.min(this.cfg.warshipCap(p), (this.hardOrWorse ? 1 : 0) + this.wantWarships + (enemyShipsNear ? 2 : 0) + (p.boats.length ? 1 : 0));
     const live = p.warships.filter((w) => !w.done).length;
     if (live < wantW && p.gold >= this.cfg.unitCost(UnitType.WARSHIP, p.warships.length, p) + reserve) {
       const pt = this.navalPatrolPoint(ports);
@@ -1606,6 +1608,11 @@ class NationAI {
     const underSiege = p.incomingAttacks.some((a) => !a.done && a.attacker === h && a.troops > p.troops * 0.3);
     const ready = p.troops > max * (underSiege ? 0.3 : ZOMBIE_PUSH_AT[this.diffIndex]);
     if (!ready || g.tick < (this.zPushAfter || 0)) return false;
+    // three quarters of what we lose attacking the dead get up again: only push when it pays - we are
+    // (partly) cured, the horde is weaker than us, a hive is close enough to burn, or it is at our throat
+    const c0 = g.centroid(p);
+    const hiveNear = c0 && g.zombie.hives.some((hv) => hv.alive && Math.hypot(g.x(hv.tile) - c0.x, g.y(hv.tile) - c0.y) < 150);
+    if (!((p.cureStep || 0) >= 2 || h.troops < p.troops * 0.5 || (hiveNear && p.troops > h.troops * 0.3) || underSiege)) return false;
     this.zPushAfter = g.tick + 60;
     // aim at the nearest hive if one is close, otherwise at the thick of the horde next door
     let focus = -1, fd = Infinity;
@@ -1623,8 +1630,10 @@ class NationAI {
     const c = g.centroid(p);
     if (!c) return false;
     hives.sort((a, b) => Math.hypot(g.x(a.tile) - c.x, g.y(a.tile) - c.y) - Math.hypot(g.x(b.tile) - c.x, g.y(b.tile) - c.y));
-    const type = p.gold >= this.cfg.nukeCost(NukeType.HYDROGEN, p) * 1.5 ? NukeType.HYDROGEN : NukeType.ATOM;
-    if (g.launchNuke(p, type, hives[0].tile).ok) { this.nukeAfter = g.tick + NUKE_CADENCE[this.diffIndex]; return true; }
+    // every bomb enrages the horde: an already furious horde only gets the small ones
+    const type = p.gold >= this.cfg.nukeCost(NukeType.HYDROGEN, p) * 1.5 && (g.zombie.rage || 0) < 6 ? NukeType.HYDROGEN : NukeType.ATOM;
+    if ((g.zombie.rage || 0) >= 10) return false;
+    if (g.launchNuke(p, type, hives[0].tile).ok) { this.nukeAfter = g.tick + NUKE_CADENCE[this.diffIndex] * 1.5; return true; }
     return false;
   }
   // ---- research sharing ----

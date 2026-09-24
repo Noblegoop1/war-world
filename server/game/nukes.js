@@ -166,6 +166,7 @@ module.exports = {
     }
     for (const [sm, count] of hitTiles) {
       const q = this.playersBySmall[sm];
+      if (q.isHorde) { this.nukeHorde(count, nk.type, nk.owner); continue; }   // kills the dead cleanly, but enrages them
       const owned = Math.max(1, before.get(sm));
       // Population dies with the ground. Per-tile death factor (OpenFront's shape), capped so a single
       // bomb can cripple but not instantly delete an army, and applied to troops in transit too.
@@ -200,21 +201,22 @@ module.exports = {
     if (!p.alive) return { ok: false, reason: 'dead' };
     if (!p.researches.has('strategic_bombers')) return { ok: false, reason: 'Needs the Strategic Bombers research' };
     const u = this.unitAt(tile);
-    if (!u || !this.hostile(p, u.owner)) return { ok: false, reason: 'Aim at an enemy structure' };
+    const hordeGround = !!(this.horde && this.owner[tile] === this.horde.smallID);
+    if (!hordeGround && (!u || !this.hostile(p, u.owner))) return { ok: false, reason: this.horde ? 'Aim at an enemy structure or zombie land' : 'Aim at an enemy structure' };
     const silos = p.completedUnitsOf(UnitType.SILO);
     if (!silos.length) return { ok: false, reason: 'Bombers launch from a Missile Silo' };
     silos.sort((a, b) => this.dist(a.tile, tile) - this.dist(b.tile, tile));
     if (this.dist(silos[0].tile, tile) > this.config.bomberRange()) return { ok: false, reason: `Out of range (${this.config.bomberRange()} tiles from a silo)` };
     const cost = this.config.bomberCost(p);
     if (p.gold < cost) return { ok: false, reason: `Not enough gold (need ${cost.toLocaleString()})` };
-    return { ok: true, cost, silo: silos[0], target: u };
+    return { ok: true, cost, silo: silos[0], target: u || this.horde };
   },
   launchBomber(p, tile) {
     const c = this.canLaunchBomber(p, tile);
     if (!c.ok) return c;
     p.removeGold(c.cost);
     this.bombers.push({ id: newId(), owner: p, x: this.x(c.silo.tile) + 0.5, y: this.y(c.silo.tile) + 0.5, tx: this.x(tile) + 0.5, ty: this.y(tile) + 0.5, targetTile: tile, done: false, checkedOwner: null });
-    this.events.push({ k: 'bomber', by: p.smallID, target: c.target.owner.smallID });
+    this.events.push({ k: 'bomber', by: p.smallID, target: (c.target.owner || c.target).smallID });
     return c;
   },
   tickBombers() {
@@ -226,6 +228,7 @@ module.exports = {
       if (d <= sp) {
         b.done = true;
         const u = this.unitAt(b.targetTile);
+        if (this.horde && this.owner[b.targetTile] === this.horde.smallID && !u) { this.bombHorde(b.owner, b.targetTile); continue; }
         if (u && this.hostile(b.owner, u.owner)) { this.events.push({ k: 'structHit', p: u.owner.smallID, type: u.type, x: this.x(u.tile), y: this.y(u.tile) }); this.removeUnit(u); this.neutralizeArea(b.owner, b.tx, b.ty, 2, 4000, 'bomb'); }
         continue;
       }

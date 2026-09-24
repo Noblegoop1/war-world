@@ -7,23 +7,33 @@
 //   * great waves announced before they hit, and a final wave from every direction as the clock runs
 //     out (They Are Billions' swarms and its "THEY ARE BILLIONS!!" finale); noise - bombs and big
 //     battles - draws the horde's attention (They Are Billions)
-//   * infection crossing the sea on ships: an infected transport or trade ship starts a new outbreak
-//     where it lands (Plague Inc's boats), plus zombie rafts the horde sends itself
+//   * spore clouds that drift across the sea to seed new hives, and that anti-air can shoot down
+//     (the fungal / airborne spread of parasite games, instead of infected ships)
 //   * scavenging the infected land: every tile taken back pays salvage and yields samples the cure
 //     needs (Infection Free Zone's expeditions)
 //
-// The horde is a player of its own (type 'zombie'): its land is zombie land, its troops are the dead.
-//   * It spreads like an ownerless attack - into empty land and into every living neighbour.
-//   * The living who die fighting it rise and join it (a difficulty-set share; cure step 2 stops yours).
+// The horde is a parasite (a player of its own, type 'zombie'): its land is zombie land, its troops
+// are the dead.
+//   * It feeds on its hosts: while it touches living nations that aren't immune it grows by 0.5% of
+//     itself every second; cut off from hosts it starves. It can never outgrow the living (a cap sized
+//     to every living army together).
+//   * Fighting it works - an attack does push it back - but three quarters of the troops you lose doing
+//     it get up again as zombies. Troops it kills on your land rise too (a smaller share). Bombs are the
+//     clean answer: nukes and bomber strikes kill the dead without feeding it - but every one enrages
+//     it, a stacking bonus to its attacks that fades slowly.
 //   * Its infection creeps across borders a few tiles at a time; walls, defense posts, a mech's hold
-//     zone and (cure step 1) your cities' surroundings stop the creep. Zombies barely scratch walls.
+//     zone and the cure stop the creep. Zombies are ten times weaker against walls than troops are.
+//   * Across the sea it travels as spore clouds from its hives: slow, visible, and SAMs (and airborne
+//     mechs) shoot them down. A cloud that lands grows a new hive.
 //
-// Phases: calm (a minute or two to expand) -> outbreak (the apocalypse) -> aftermath (the horde is
-// cured, wiped out, or the clock ran out: its land rots back to empty ground for a last land rush)
-// -> over. Two results: every nation still standing survived; the strongest survivor wins outright.
+// Phases: calm (a minute or three to expand) -> outbreak -> aftermath (the horde is wiped out or the
+// clock ran out: its land rots back to empty ground for a last land rush) -> over. Two results: every
+// nation still standing survived; the strongest survivor wins outright.
 //
-// The cure: three steps researched in any of your labs, alongside your doctrines. Steps 2 and 3 need
-// samples - zombie land you have taken back. The first nation to finish step 3 cures the world.
+// The cure is per nation, not a switch for the world: three quick steps in your labs (steps 2 and 3 need
+// samples). Each step means fewer of your dead rise and more of your land holds against the creep; the
+// last one makes a nation immune - the parasite can't feed on it, its dead stay dead, the creep can't touch
+// it. A world where every survivor is immune starves the horde out.
 // Mixed into Game.prototype.
 const { PlayerType, UnitType } = require('./config');
 
@@ -34,37 +44,45 @@ const Z = {
   hives: [2, 3, 4, 5],
   hiveRadius: [6, 7, 8, 9],
   // The horde is sized against the living: W = every living nation's and player's troops together.
-  startShare: [0.3, 0.45, 0.55, 0.8],          // the horde at the outbreak, x W
-  growthShare: [0.0005, 0.0008, 0.00095, 0.0013],// growth per tick, x W (on top of the dead that rise)
-  growthPerTile: [0.1, 0.16, 0.24, 0.34],       // troops per tick per zombie tile
-  capShare: [0.7, 1.1, 1.3, 1.8],               // soft cap, x W: above it the dead rot faster than they rise
-  hiveGuard: 2.5,                               // ground near a living hive is this much harder to take
-  convert: [0.2, 0.3, 0.36, 0.48],              // share of the living killed fighting it that rise again
-  attackEvery: [70, 50, 44, 34],
-  attackShare: [0.14, 0.18, 0.2, 0.25],
+  startShare: [0.5, 0.7, 0.9, 1.15],            // the horde at the outbreak, x W
+  feed: [0.004, 0.005, 0.0055, 0.0065],         // growth per second, x its own size (0.5% on Outbreak)
+  hungry: 0.5,                                  // ...at this share while it touches no host at all
+  hiveFeed: 0.002,                              // each living hive adds this much growth per second
+  holdDensity: [150, 130, 110, 90],             // it only pushes into empty land while it has this many dead per tile
+  capShare: [0.6, 0.9, 1.1, 1.4],               // it can never outgrow the living: cap, x W
+  hiveGuard: 3,                               // ground near a living hive is this much harder to take
+  attackerRise: 0.75,                           // share of troops lost attacking it that rise as zombies
+  convert: [0.25, 0.35, 0.45, 0.55],            // share of troops it kills on your land that rise
+  attackEvery: [100, 80, 70, 60],
+  attackShare: [0.07, 0.09, 0.11, 0.13],
   wildShare: [0.04, 0.05, 0.06, 0.07],          // share sent into empty land each push...
-  wildCap: [0.008, 0.012, 0.014, 0.018],        // ...but never more than this x W, so the wilds fill at a walk, not a sprint
+  wildCap: [0.02, 0.03, 0.035, 0.045],          // ...but never more than this x W, so the wilds fill at a walk, not a sprint
   creep: [0.004, 0.007, 0.009, 0.013],          // chance per contact tile per 2s
   waveEvery: [4200, 3600, 3000, 2400],          // great waves (7, 6, 5, 4 min)
-  waveBonus: [0.35, 0.55, 0.8, 1.1],            // extra dead a wave brings, x its target's army
-  raftEvery: [2400, 1800, 1200, 800],
-  raftShare: [0.03, 0.04, 0.05, 0.07],
-  sporeEvery: [0, 6000, 4800, 3600],            // a hive seeds another landmass this often (0 = never)
+  waveBonus: [0.3, 0.45, 0.6, 0.8],             // extra dead a wave brings, x its target's army
+  sporeEvery: [4800, 3600, 3000, 2400],         // each living hive releases a spore cloud this often
+  orphanSporeEvery: [0, 6000, 4800, 3600],      // with no hive left, the horde itself does (0 = never)
+  sporeShare: [0.03, 0.04, 0.05, 0.06],         // share of the horde a cloud carries
   surviveMin: [25, 30, 35, 40],
-  wallDamage: [0.15, 0.2, 0.25, 0.3],           // zombies against walls, as a share of troops' damage
-  defense: [0.8, 1, 1.15, 1.3],                 // how costly zombie ground is to take
-  cureTime: [0.8, 1, 1.15, 1.3],
-  infectShip: [0.15, 0.25, 0.35, 0.5],
+  wallDamage: [0.1, 0.1, 0.1, 0.1],             // zombies against walls: ten times weaker than troops
+  defense: [1.6, 2, 2.4, 2.8],                  // how costly zombie ground is to take
+  cureTime: [0.8, 1, 1.1, 1.2],
 };
 const WARN_TICKS = 300;                  // a great wave is announced 30s before it breaks
 const AFTERMATH_TICKS = 3000;            // 5 minutes of land rush once the horde is gone
 const ROT_TICKS = 600;                   // zombie land rots away over a minute after the cure
-const CURE_BASE_TICKS = [0, 1800, 3000, 4800];   // cure steps: 3, 5, 8 minutes at a level-1 lab
-const CURE_SAMPLES = [0, 0, 0.004, 0.012];       // samples (share of the land taken back from the horde)
+const CURE_BASE_TICKS = [0, 1200, 1800, 2400];   // cure steps: 2, 3, 4 minutes at a level-1 lab
+const CURE_SAMPLES = [0, 0, 0.0006, 0.002];      // samples needed, as a share of the land
+const KILLS_PER_SAMPLE = 3000;                   // zombies killed (defending, attacking or bombing) per sample
+const CURE_RISE = [1, 0.75, 0.5, 0];             // share of the usual dead that still rise, by cure step
+const CURE_ATTACK_LOSS = [1, 1, 0.8, 0.6];       // your losses attacking the horde, by cure step
+const SPORE_SPEED = 0.5;                         // tiles per tick
+const RAGE_DECAY_TICKS = 900;                    // one stack of rage fades every 90 seconds
+const RAGE_MAX = 12;
 const SALVAGE_GOLD = 120;                // gold per zombie tile taken back
 const HIVE_REWARD = { samples: 150, gold: 400000 };
 const IMMUNE_CITY_RADIUS = 15;           // cure step 1: creep can't take ground this close to your cities
-const CURE_NAMES = ['', 'Isolate the Strain', 'Vaccine Trials', 'Mass Inoculation'];
+const CURE_NAMES = ['', 'Isolate the Strain', 'Vaccine Trials', 'Immunity'];
 
 module.exports = {
   isZombieGame() { return this.settings.mode === 'zombie'; },
@@ -77,40 +95,48 @@ module.exports = {
     h.color = '#5a8f3c';
     h.isHorde = true;
     this.horde = h;
-    this.zombie = { phase: 'calm', outbreakTick: 0, endTick: 0, waveAt: 0, wave: null, raftAt: 0, finalWave: false, aftermathEnd: 0, rotEnd: 0, hives: [], curedBy: null, result: null, noise: new Map() };
+    this.zombie = { phase: 'calm', outbreakTick: 0, endTick: 0, waveAt: 0, wave: null, finalWave: false, aftermathEnd: 0, rotEnd: 0, hives: [], result: null, noise: new Map(), rage: 0, rageAt: 0, orphanSporeAt: 0 };
+    this.spores = [];
   },
   hordeAlive() { return !!(this.horde && this.horde.tiles.size > 0); },
 
   // ---- the outbreak ----
-  // Hives go where nobody lives: the land furthest from every nation, spread over the map, preferring
-  // continents that have people on them (so nobody is safe) but no hive yet.
+  // Hives open on the continents people live on: in the wilds (empty land or a tribe's) if there is any,
+  // otherwise deep in a nation's hinterland, far from its capital - patient zero. Spread over those
+  // continents, never on a lonely islet where the dead would have nobody to reach.
   pickHiveSites(count, avoid = []) {
-    const living = this.players.filter((p) => p.alive && !p.isHorde);
-    const massHasPeople = new Set();
-    for (const p of living) { let i = 0; for (const t of p.border) { if (i++ > 40) break; massHasPeople.add(this.landmass[t]); } }
+    const living = this.players.filter((p) => p.alive && !p.isHorde && p.type !== PlayerType.BOT);
+    if (!this.landmassSize) { this.landmassSize = new Map(); for (let t = 0; t < this.landmass.length; t++) { const m = this.landmass[t]; if (m >= 0) this.landmassSize.set(m, (this.landmassSize.get(m) || 0) + 1); } }
+    const peopled = new Set();
+    for (const p of living) { let i = 0; for (const t of p.border) { if (i++ > 60) break; peopled.add(this.landmass[t]); } }
+    const minMass = Math.max(300, this.numLand * 0.004);
+    const open = (t) => { const o = this.owner[t]; return o === 0 || this.playersBySmall[o].type === PlayerType.BOT; };
+    const collect = (requirePeople) => {
+      const out = [];
+      for (let k = 0; k < 6000; k++) {
+        const t = this.rng.int(0, this.terrain.length - 1);
+        if (!this.isLand(t) || this.owner[t] === (this.horde ? this.horde.smallID : -1)) continue;
+        const m = this.landmass[t];
+        if ((this.landmassSize.get(m) || 0) < minMass || (requirePeople && !peopled.has(m))) continue;
+        let dmin = Infinity;
+        for (const p of living) { const c = p.spawnTile ?? -1; if (c >= 0) dmin = Math.min(dmin, this.dist(c, t)); }
+        if (dmin < 30) continue;
+        out.push({ t, m, score: Math.min(dmin, 150) + (this.owner[t] === 0 ? 40 : open(t) ? 25 : 0) + this.rng.next() * 15 });
+      }
+      return out.sort((x, y) => y.score - x.score);
+    };
+    let cands = collect(true);
+    if (cands.length < count) cands = cands.concat(collect(false));
     const sites = [];
-    const minApart = Math.hypot(this.width, this.height) / (count + 1.5);
-    const cands = [];
-    for (let k = 0; k < 4000; k++) {
-      const t = this.rng.int(0, this.terrain.length - 1);
-      if (!this.isLand(t) || this.owner[t] !== 0) continue;
-      let dmin = Infinity;
-      for (const p of living) { const c = p.spawnTile ?? -1; if (c >= 0) dmin = Math.min(dmin, this.dist(c, t)); }
-      if (dmin < 25) continue;
-      const bonus = massHasPeople.has(this.landmass[t]) ? 1.6 : 0.7;
-      cands.push({ t, score: Math.min(dmin, 200) * bonus + this.rng.next() * 10 });
+    const minApart = Math.max(30, Math.hypot(this.width, this.height) / (count * 3));
+    const perMass = new Map();
+    for (const pass of [1, 2, 99]) {   // one per continent first, then two, then wherever there is room
+      for (const c of cands) {
+        if (sites.length >= count) break;
+        if ((perMass.get(c.m) || 0) >= pass || [...sites, ...avoid].some((x) => this.dist(x, c.t) < minApart)) continue;
+        sites.push(c.t); perMass.set(c.m, (perMass.get(c.m) || 0) + 1);
+      }
     }
-    cands.sort((a, b) => b.score - a.score);
-    const usedMass = new Map();
-    for (const c of cands) {
-      if (sites.length >= count) break;
-      if ([...sites, ...avoid].some((s) => this.dist(s, c.t) < minApart)) continue;
-      const m = this.landmass[c.t];
-      if ((usedMass.get(m) || 0) >= 1 && usedMass.size < massHasPeople.size) continue;   // one per continent first
-      sites.push(c.t); usedMass.set(m, (usedMass.get(m) || 0) + 1);
-    }
-    // not enough wilderness (a crowded map): fall back to the emptiest owned ground
-    for (const c of cands) { if (sites.length >= count) break; if (!sites.includes(c.t)) sites.push(c.t); }
     return sites;
   },
   // The dead rise at a tile: the horde takes the ground around it (whoever held it) and gains troops.
@@ -132,7 +158,7 @@ module.exports = {
       }
     }
     h.addTroops(troops);
-    if (hive) this.zombie.hives.push({ tile, alive: true, sporeAt: this.tick + (Z.sporeEvery[this.zdi()] || 1e12), born: this.tick });
+    if (hive) this.zombie.hives.push({ tile, alive: true, sporeAt: this.tick + Z.sporeEvery[this.zdi()], born: this.tick });
     this.events.push({ k: kind, x: cx, y: cy, size: hive ? 'hive' : kind === 'outbreak' ? 'small' : kind });
     for (const o of this.players) if (o.alive && !o.isHorde) this.checkDeadByOutbreak(o);
   },
@@ -149,24 +175,33 @@ module.exports = {
     }
     if (z.phase === 'aftermath') { this.tickAftermath(); return; }
     if (z.phase !== 'outbreak') return;
-    // the hives: lost ones stop feeding the horde; living ones seed other continents
+    // the hives: lost ones are burned; living ones release spore clouds across the sea
     for (const hv of z.hives) {
       if (!hv.alive) continue;
       if (this.owner[hv.tile] !== h.smallID) { this.burnHive(hv); continue; }
-      if (Z.sporeEvery[d] && this.tick >= hv.sporeAt) { hv.sporeAt = this.tick + Z.sporeEvery[d]; this.spore(hv); }
+      if (this.tick >= hv.sporeAt) { hv.sporeAt = this.tick + Z.sporeEvery[d]; this.releaseSpore(hv.tile); }
     }
-    // growth, sized to the living, with a soft cap: past it the dead rot faster than they rise
-    if (this.tick % 10 === 0) z.W = this.livingStrength();
-    const tiles = h.tiles.size, hives = z.hives.filter((x) => x.alive).length;
-    const W = z.W || 1;
-    const cap = W * Z.capShare[d];
-    if (h.troops < cap) h.addTroops(tiles * Z.growthPerTile[d] + W * Z.growthShare[d] * (hives ? 1 : 0.5));
-    else h.removeTroops((h.troops - cap) * 0.005);
+    const hives = z.hives.filter((x) => x.alive).length;
+    if (!hives && Z.orphanSporeEvery[d] && this.hordeAlive() && this.tick >= z.orphanSporeAt) {
+      z.orphanSporeAt = this.tick + Z.orphanSporeEvery[d];
+      const b = [...h.border]; if (b.length) this.releaseSpore(b[this.rng.int(0, b.length - 1)]);
+    }
+    this.tickSpores();
+    // the parasite: it feeds on the hosts it touches, starves without them, never outgrows the living
+    if (this.tick % 10 === 0) {
+      z.W = this.livingStrength();
+      const cap = z.W * Z.capShare[d];
+      const hosts = this.hordeAlive() ? this.neighborsOf(h).players.filter((o) => o.alive && !o.isHorde && (o.cureStep || 0) < 3) : [];
+      z.feeding = hosts.length > 0;
+      if (h.troops > cap) h.removeTroops((h.troops - cap) * 0.05);
+      else h.addTroops(Math.min(cap - h.troops, h.troops * (Z.feed[d] * (z.feeding ? 1 : Z.hungry) + hives * Z.hiveFeed)));
+    }
+    // rage from being bombed fades
+    if (z.rage > 0 && this.tick >= z.rageAt) { z.rage = Math.max(0, z.rage - 1); z.rageAt = this.tick + RAGE_DECAY_TICKS; }
     for (const [sm, n] of z.noise) { const nn = n * 0.997; if (nn < 1) z.noise.delete(sm); else z.noise.set(sm, nn); }
     if (this.tick % Z.attackEvery[d] === 0) this.hordePush();
     if (this.tick % 20 === 0) this.hordeCreep();
     this.tickWaves();
-    if (this.tick >= z.raftAt) { z.raftAt = this.tick + Z.raftEvery[d]; this.hordeRaft(); }
     // the end of the apocalypse: the horde is gone, or the clock ran out
     if (!this.hordeAlive() && !hives) this.endApocalypse('wiped');
     else if (this.tick >= z.endTick) this.endApocalypse('survived');
@@ -177,8 +212,8 @@ module.exports = {
     z.outbreakTick = this.tick;
     z.endTick = this.tick + this.zombieSurviveTicks();
     z.waveAt = this.tick + Z.waveEvery[d];
-    z.raftAt = this.tick + Z.raftEvery[d];
     z.W = this.livingStrength();
+    z.orphanSporeAt = this.tick + (Z.orphanSporeEvery[d] || 1e12);
     const sites = this.pickHiveSites(Z.hives[d]);
     const per = Math.max(20000, Math.floor(z.W * Z.startShare[d] / Math.max(1, sites.length)));
     for (const t of sites) this.outbreakAt(t, Z.hiveRadius[d], per, true);
@@ -193,15 +228,86 @@ module.exports = {
     }
     this.events.push({ k: 'hiveBurned', by: by ? by.smallID : 0, x: this.x(hv.tile), y: this.y(hv.tile) });
   },
-  // A hive seeds a new, smaller hive on another continent that still has living people on it.
-  spore(hv) {
-    const masses = new Set(); for (const x of this.zombie.hives) if (x.alive) masses.add(this.landmass[x.tile]);
-    const sites = this.pickHiveSites(3, this.zombie.hives.map((x) => x.tile)).filter((t) => !masses.has(this.landmass[t]));
-    const t = sites[0] ?? this.pickHiveSites(1, this.zombie.hives.map((x) => x.tile))[0];
-    if (t === undefined) return;
-    void hv;
-    const d = this.zdi();
-    this.outbreakAt(t, Math.max(4, Z.hiveRadius[d] - 3), Math.floor(this.horde.troops * 0.05) + 5000, true, 'spore');
+  // A spore cloud: released from a hive, it drifts slowly across the sea toward living people on another
+  // continent (the nearest, or the noisiest). Where it lands a new hive grows. SAMs and airborne mechs
+  // shoot clouds down, so anti-air is how you keep the plague off your shores.
+  releaseSpore(fromTile) {
+    const h = this.horde, d = this.zdi();
+    if (!h || h.troops < 5000) return;
+    const src = this.landmass[fromTile], sx = this.x(fromTile), sy = this.y(fromTile);
+    let best = null, bestScore = -Infinity;
+    for (const o of this.players) {
+      if (!o.alive || o.isHorde || o.type === PlayerType.BOT || (o.cureStep || 0) >= 3) continue;
+      let i = 0, near = -1, nd = Infinity;
+      for (const t of o.tiles) { if (i++ % 23) continue; if (i > 6000) break; if (this.landmass[t] === src) continue; const dd = Math.hypot(this.x(t) - sx, this.y(t) - sy); if (dd < nd) { nd = dd; near = t; } }
+      if (near < 0) continue;
+      const score = -nd + (this.zombie.noise.get(o.smallID) || 0) * 0.2;
+      if (score > bestScore) { bestScore = score; best = { o, t: near }; }
+    }
+    if (!best) return;
+    const troops = Math.floor(h.removeTroops(h.troops * Z.sporeShare[d]));
+    const cloud = { id: this.nextSporeId = (this.nextSporeId || 0) + 1, x: sx + 0.5, y: sy + 0.5, tx: this.x(best.t) + 0.5, ty: this.y(best.t) + 0.5, tile: best.t, target: best.o.smallID, troops, done: false };
+    this.spores.push(cloud);
+    this.events.push({ k: 'sporeCloud', x: sx, y: sy, tx: this.x(best.t), ty: this.y(best.t), p: best.o.smallID });
+  },
+  tickSpores() {
+    if (!this.spores.length) return;
+    for (const c of this.spores) {
+      if (c.done) continue;
+      // anti-air: a ready SAM in range (or an airborne mech) shoots the cloud down
+      let shot = null;
+      for (const u of this.units) {
+        if (u.type !== UnitType.SAM || u.constructionLeft > 0 || u.cooldown > 0 || u.owner.isHorde) continue;
+        const r = this.config.samRange(u.owner);
+        if ((this.x(u.tile) - c.x) ** 2 + (this.y(u.tile) - c.y) ** 2 <= r * r) { u.cooldown = this.config.samCooldownTicks(); this.unitsChanged = true; shot = u.owner; break; }
+      }
+      if (!shot) for (const m of this.mechs) if (!m.done && !m.owner.isHorde && m.owner.researches.has('airborne_mechs') && Math.hypot(m.x - c.x, m.y - c.y) <= m.range * 1.5) { shot = m.owner; break; }
+      if (shot) { c.done = true; this.events.push({ k: 'sporeDown', by: shot.smallID, x: c.x, y: c.y }); continue; }
+      const dx = c.tx - c.x, dy = c.ty - c.y, dist = Math.hypot(dx, dy);
+      if (dist <= SPORE_SPEED) {
+        c.done = true;
+        if (this.zombie.phase === 'outbreak' && !this.wallHp[c.tile]) this.outbreakAt(c.tile, 4, c.troops, true, 'sporeLanding');
+        continue;
+      }
+      c.x += (dx / dist) * SPORE_SPEED; c.y += (dy / dist) * SPORE_SPEED;
+    }
+    this.spores = this.spores.filter((c) => !c.done);
+  },
+  sporesPacket() { return (this.spores || []).map((c) => [c.id, Math.round(c.x * 10) / 10, Math.round(c.y * 10) / 10, Math.round(c.tx), Math.round(c.ty), c.target, Math.floor(c.troops)]); },
+  // ---- rage: bombs kill the dead cleanly, but every one makes the rest angrier ----
+  enrage(amount) {
+    const z = this.zombie;
+    if (!z || z.phase !== 'outbreak') return;
+    z.rage = Math.min(RAGE_MAX, z.rage + amount);
+    z.rageAt = this.tick + RAGE_DECAY_TICKS;
+    this.events.push({ k: 'hordeRage', rage: Math.round(z.rage * 10) / 10 });
+  },
+  // The horde's attacks lose fewer and move faster the angrier it is.
+  hordeRageLoss() { return this.zombie ? 1 / (1 + 0.08 * this.zombie.rage) : 1; },
+  hordeRageSpeed() { return this.zombie ? 1 + 0.04 * this.zombie.rage : 1; },
+  // A nuke on zombie land: kills a share of the horde by how much of it the blast covered - none of them rise.
+  nukeHorde(tilesHit, type, by = null) {
+    const h = this.horde;
+    const share = tilesHit / Math.max(1, h.tiles.size + tilesHit);
+    const cap = type === 'hydrogen' ? 0.2 : type === 'bomblet' ? 0.015 : 0.1;
+    const killed = h.troops * Math.min(cap, share * 1.5 + (type === 'bomblet' ? 0.003 : 0.02));
+    h.removeTroops(killed);
+    this.sampleKills(by, killed);
+    this.enrage(type === 'hydrogen' ? 3 : type === 'bomblet' ? 0.3 : 1.5);
+    return killed;
+  },
+  // A bomber strike on zombie land: burns a patch clean and kills a slice of the horde.
+  bombHorde(by, tile) {
+    const h = this.horde;
+    h.removeTroops(h.troops * 0.025);
+    const cx = this.x(tile), cy = this.y(tile);
+    for (let dy = -4; dy <= 4; dy++) for (let dx = -4; dx <= 4; dx++) {
+      if (dx * dx + dy * dy > 16 || !this.valid(cx + dx, cy + dy)) continue;
+      const t = this.ref(cx + dx, cy + dy);
+      if (this.owner[t] === h.smallID) this.relinquish(t);
+    }
+    this.enrage(0.5);
+    this.events.push({ k: 'shellHit', x: cx, y: cy, by: by.smallID, cause: 'bomb' });
   },
   // Who does the horde go for? Noise (bombs, big battles) draws it; so does a long shared border and a thin army.
   hordeTargets() {
@@ -218,7 +324,7 @@ module.exports = {
     if (!this.hordeAlive() || h.troops < 500) return;
     const targets = this.hordeTargets();
     // into the wilderness: the horde fills empty land and so reaches everyone eventually
-    if (this.neighborsOf(h).touchesNeutral) this.sendAttack(h, null, Math.min(h.troops * Z.wildShare[d], (this.zombie.W || h.troops) * Z.wildCap[d]));
+    if (h.troops / Math.max(1, h.tiles.size) > Z.holdDensity[d] && this.neighborsOf(h).touchesNeutral) this.sendAttack(h, null, Math.min(h.troops * Z.wildShare[d], (this.zombie.W || h.troops) * Z.wildCap[d]));
     // at the living: one main push, and a probe at a second target
     if (targets[0]) this.sendAttack(h, targets[0].o, h.troops * Z.attackShare[d]);
     if (targets[1] && this.rng.chance(2)) this.sendAttack(h, targets[1].o, h.troops * Z.attackShare[d] * 0.4);
@@ -245,7 +351,9 @@ module.exports = {
         flips.push([nb, o]);
       }
     }
+    const rage = this.zombie.rage;
     for (const [t, o] of flips) {
+      if (rage > 0 && this.rng.next() < 0.5 / (1 + 0.1 * rage)) continue;   // calm hordes creep slower
       o.removeTroops(o.troops / Math.max(1, o.numTiles));
       const u = this.unitAt(t); if (u) this.removeUnit(u);
       this.conquer(h, t);
@@ -253,6 +361,7 @@ module.exports = {
     }
   },
   creepBlocked(o, t) {
+    if ((o.cureStep || 0) >= 3) return true;   // immune
     if (this.hasDefensePostNearby(o, t)) return true;
     if (o.mechs.length && this.mechHolding(o, t)) return true;
     if ((o.cureStep || 0) >= 1) {
@@ -293,38 +402,21 @@ module.exports = {
       this.events.push({ k: 'finalWave' });
     }
   },
-  // Rafts: the horde sends the dead across the water at the nearest living coast. Warships sink them.
-  hordeRaft() {
-    const h = this.horde, d = this.zdi();
-    if (!this.hordeAlive() || this.settings.disableBoats || h.troops < 2000) return;
-    let src = -1; { let i = 0; for (const t of h.border) { if (i++ % 5) continue; if (this.isOceanShore(t)) { src = t; break; } } }
-    if (src < 0) return;
-    let best = -1, bd = Infinity;
-    for (const o of this.players) {
-      if (!o.alive || o.isHorde || o.type === PlayerType.BOT) continue;
-      let i = 0;
-      for (const t of o.border) {
-        if (i++ % 9) continue; if (i > 3000) break;
-        if (!this.isOceanShore(t) || this.landmass[t] === this.landmass[src]) continue;
-        const dd = this.dist(t, src);
-        if (dd < bd) { bd = dd; best = t; }
-      }
-    }
-    if (best < 0 || bd > 350 || this.pathBudget-- <= 0) return;
-    const boat = this.sendBoat(h, best, h.troops * Z.raftShare[d], { maxIter: 60000, tries: 2 });
-    if (boat) this.events.push({ k: 'raft', x: this.x(best), y: this.y(best), p: this.owner[best] });
-  },
   noteNoise(p, n) { if (this.zombie && p && !p.isHorde) this.zombie.noise.set(p.smallID, (this.zombie.noise.get(p.smallID) || 0) + n); },
 
   // ---- dying fighting the dead ----
   // \`victim\` lost \`n\` troops to the horde (attacking it or defending from it): some of them rise.
-  zombieConvert(victim, n) {
+  // `attacking`: the victim lost them attacking the horde (three quarters rise); otherwise the horde
+  // killed them on the victim's own land (a difficulty-set share rises). The cure cuts both.
+  zombieConvert(victim, n, attacking = false) {
     if (!this.zombie || this.zombie.phase !== 'outbreak' || !(n > 0)) return;
-    const step = victim.cureStep || 0;
-    if (step >= 2) return;
-    this.horde.addTroops(n * Z.convert[this.zdi()] * (step >= 1 ? 0.5 : 1));
+    const rise = (attacking ? Z.attackerRise : Z.convert[this.zdi()]) * CURE_RISE[Math.min(3, victim.cureStep || 0)];
+    if (rise > 0) this.horde.addTroops(n * rise);
     if (n > 20000) this.noteNoise(victim, n / 5000);
   },
+  // Killing the dead - on your walls, in your attacks, with your bombs - yields samples for the cure.
+  sampleKills(p, killed) { if (p && !p.isHorde && killed > 0) p.samples = (p.samples || 0) + killed / KILLS_PER_SAMPLE; },
+  cureAttackLoss(p) { return CURE_ATTACK_LOSS[Math.min(3, p.cureStep || 0)]; },
   // How costly a zombie tile is to take: harder the closer it is to a living hive (the nest is thick with them).
   zombieDefenseMult(tile) {
     let m = Z.defense[this.zdi()];
@@ -346,28 +438,6 @@ module.exports = {
     p.samples = (p.samples || 0) + 1;
     p.addGold(SALVAGE_GOLD, 'plunder');
   },
-  // Ships leaving near zombie land may carry the infection with them.
-  hordeNear(tile, r) {
-    if (!this.hordeAlive() || !this.zombie || this.zombie.phase !== 'outbreak') return false;
-    const x = this.x(tile), y = this.y(tile), h = this.horde.smallID;
-    for (let k = 0; k < 16; k++) {
-      const a = (k / 16) * Math.PI * 2;
-      for (const rr of [r * 0.4, r * 0.75, r]) {
-        const tx = Math.round(x + Math.cos(a) * rr), ty = Math.round(y + Math.sin(a) * rr);
-        if (this.valid(tx, ty) && this.owner[this.ref(tx, ty)] === h) return true;
-      }
-    }
-    return false;
-  },
-  maybeInfectShip(ship, fromTile, r) {
-    if (!this.isZombieGame() || ship.owner.isHorde) return;
-    if (this.hordeNear(fromTile, r) && this.rng.next() < Z.infectShip[this.zdi()]) ship.infected = true;
-  },
-  shipLanded(ship, tile) {
-    if (!ship.infected || !this.zombie || this.zombie.phase !== 'outbreak') return;
-    this.outbreakAt(tile, 3, Math.floor((ship.troops || 20000) * 0.4) + 3000, false, 'shipOutbreak');
-  },
-
   // ---- the cure ----
   cureInfo(p) {
     const step = (p.cureStep || 0) + 1;
@@ -382,7 +452,7 @@ module.exports = {
     if (!info.step || info.ok === false) return info;
     const labs = p.completedUnitsOf(UnitType.LAB);
     if (!labs.length) return { ok: false, reason: 'The cure needs a Research Lab' };
-    if ((p.samples || 0) < info.samples) return { ok: false, reason: `Cure step ${info.step} needs ${info.samples} samples - take back zombie land (you have ${p.samples || 0})` };
+    if ((p.samples || 0) < info.samples) return { ok: false, reason: `Cure step ${info.step} needs ${info.samples} samples - kill zombies or take back their land (you have ${Math.floor(p.samples || 0)})` };
     labs.sort((a, b) => b.level - a.level);
     return { ok: true, info, lab: labs[0] };
   },
@@ -403,10 +473,13 @@ module.exports = {
       p.cureStep = p.cure.step;
       p.cure = null;
       this.events.push({ k: 'cureStep', p: p.smallID, step: p.cureStep });
-      if (p.cureStep >= 3 && this.zombie.phase === 'outbreak') { this.zombie.curedBy = p; this.endApocalypse('cured'); }
+      if (p.cureStep >= 3) this.events.push({ k: 'immune', p: p.smallID });
     }
   },
-  curePacket(p) { return [p.samples || 0, p.cureStep || 0, p.cure ? [p.cure.step, Math.max(0, p.cure.doneTick - this.tick), p.cure.doneTick - p.cure.startTick] : null]; },
+  curePacket(p) {
+    const next = Math.min(3, (p.cureStep || 0) + 1);
+    return [Math.floor(p.samples || 0), p.cureStep || 0, p.cure ? [p.cure.step, Math.max(0, p.cure.doneTick - this.tick), p.cure.doneTick - p.cure.startTick] : null, Math.ceil(this.numLand * CURE_SAMPLES[next])];
+  },
 
   // ---- the end ----
   endApocalypse(how) {
@@ -420,7 +493,8 @@ module.exports = {
     for (const a of this.attacks) if (a.attacker === this.horde) a.done = true;
     for (const b of this.boats) if (b.owner === this.horde) b.done = true;
     for (const hv of z.hives) hv.alive = false;
-    this.events.push({ k: how === 'cured' ? 'cured' : how === 'wiped' ? 'hordeWiped' : 'survivedPlague', p: z.curedBy ? z.curedBy.smallID : 0, survivors: z.survivors.length });
+    this.spores = [];
+    this.events.push({ k: how === 'wiped' ? 'hordeWiped' : 'survivedPlague', p: 0, survivors: z.survivors.length });
     // the dead stop coming back for anyone
     for (const p of this.players) if (!p.isHorde) p.cureStep = Math.max(p.cureStep || 0, 2);
   },
@@ -442,7 +516,7 @@ module.exports = {
   survivorScore(p) {
     const land = p.tiles.size / Math.max(1, this.numLand) * 10000;
     let build = 0; for (const u of p.units) build += (u.level || 1) * 25;
-    const cure = (p.cureStep || 0) * 150 + (this.zombie.curedBy === p ? 1500 : 0);
+    const cure = (p.cureStep || 0) * 200 + ((p.cureStep || 0) >= 3 ? 600 : 0);
     return Math.round(land + p.troops / 1000 + p.gold / 10000 + build + cure + (p.samples || 0) / 5);
   },
   finishZombieGame() {
@@ -476,7 +550,7 @@ module.exports = {
     if (!z) return null;
     const hives = z.hives.filter((h) => h.alive).map((h) => h.tile);
     const next = z.phase === 'calm' ? this.spawnTicks + Z.calmTicks[this.zdi()] - this.tick : z.phase === 'outbreak' ? z.endTick - this.tick : z.phase === 'aftermath' ? z.aftermathEnd - this.tick : 0;
-    return [z.phase, Math.max(0, next), this.horde ? this.horde.smallID : 0, hives, z.wave ? [z.wave.target, Math.max(0, z.wave.at - this.tick), z.wave.x, z.wave.y] : null, z.result, Z.names[this.zdi()], z.how || ''];
+    return [z.phase, Math.max(0, next), this.horde ? this.horde.smallID : 0, hives, z.wave ? [z.wave.target, Math.max(0, z.wave.at - this.tick), z.wave.x, z.wave.y] : null, z.result, Z.names[this.zdi()], z.how || '', Math.round(z.rage * 10) / 10, z.feeding ? 1 : 0];
   },
   zombieCureNames() { return CURE_NAMES; },
 };

@@ -122,6 +122,7 @@ const LARGE_ATTACKER_SPEED_DEPTH = 0.73;
 const BOT_DEFENDER_LOSS_MULT = 0.7;
 const TERRA_NULLIUS_COST_SCALE = 2000;
 // ---- economy (see passiveGold) ----
+const LAND_TROOPS = 1300;                                // max troops per tile^0.6 (OpenFront: 1000)
 const LAND_GOLD = 2.5;                                   // gold/tick per sqrt(tile)
 const CITY_GOLD_UNIT = 70;                               // gold/tick for a level-1 City
 const CITY_GOLD_BY_LEVEL = [0, 1, 2.2, 3.6, 6.5];        // multiples of the unit; level 4 is the big step
@@ -431,13 +432,18 @@ class Config {
   }
   maxTroops(player) {
     if (player.type === PlayerType.HUMAN && this.infiniteTroops()) return 1e9;
-    const max = (2 * (Math.pow(player.numTiles, 0.6) * 1000 + 50000) + player.cityLevels() * this.cityTroopIncrease(player)) * R.maxTroopsMultiplier(player);
+    // Land counts for a bit more than OpenFront's 1000 per tile^0.6, so a wide nation can field an army to
+    // match a nation that stacked cities on a small patch.
+    const max = (2 * (Math.pow(player.numTiles, 0.6) * LAND_TROOPS + 50000) + player.cityLevels() * this.cityTroopIncrease(player)) * R.maxTroopsMultiplier(player);
     if (player.type === PlayerType.BOT) return max / 3;
     if (player.type === PlayerType.HUMAN) return max;
     switch (this.difficulty()) {
+      // OpenFront's 0.5 / 0.75 / 1 / 1.25, trimmed at the top: our nations also get doctrines, mechs and a
+      // smarter economy, which OpenFront's don't
       case Difficulty.EASY: return max * 0.5;
-      case Difficulty.MEDIUM: return max * 0.75;
-      case Difficulty.IMPOSSIBLE: return max * 1.25;
+      case Difficulty.MEDIUM: return max * 0.7;
+      case Difficulty.HARD: return max * 0.85;
+      case Difficulty.IMPOSSIBLE: return max * 1.05;
       default: return max;
     }
   }
@@ -448,9 +454,10 @@ class Config {
     if (player.type === PlayerType.BOT) toAdd *= 0.5;
     if (player.type === PlayerType.NATION) {
       switch (this.difficulty()) {
-        case Difficulty.EASY: toAdd *= 0.9; break;
-        case Difficulty.MEDIUM: toAdd *= 0.95; break;
-        case Difficulty.IMPOSSIBLE: toAdd *= 1.05; break;
+        case Difficulty.EASY: toAdd *= 0.85; break;
+        case Difficulty.MEDIUM: toAdd *= 0.9; break;
+        case Difficulty.HARD: toAdd *= 0.95; break;
+        case Difficulty.IMPOSSIBLE: toAdd *= 1; break;
       }
     }
     toAdd *= R.troopGrowthMultiplier(player, player.connectedFactories || 0);

@@ -886,8 +886,9 @@ class Game {
       const borderSize = a.border.size + a.rng.int(0, 5);
       let tickBudget = 1;
       let troops = a.troops;
-      const speedMult = R.attackSpeedMultiplier(attacker);
-      const lossMult = R.attackerLossMultiplier(attacker, !!target);
+      // an enraged horde (bombed recently) hits harder and moves faster
+      const speedMult = R.attackSpeedMultiplier(attacker) * (attacker.isHorde ? this.hordeRageSpeed() : 1);
+      const lossMult = R.attackerLossMultiplier(attacker, !!target) * (attacker.isHorde ? this.hordeRageLoss() : 1);
       while (tickBudget > 0) {
         if (troops < 1) { a.troops = 0; a.done = true; break; }
         if (a.heap.size === 0) {
@@ -948,15 +949,15 @@ class Game {
           attackerLossMult: lossMult,
         });
         tickBudget -= res.tickFraction;
-        // cure step 2: your troops fighting the horde lose far fewer
-        const zLoss = target && target.isHorde && attacker.cureStep >= 2 ? 0.65 : 1;
+        // the cure: your troops fighting the horde lose fewer
+        const zLoss = target && target.isHorde ? this.cureAttackLoss(attacker) : 1;
         troops -= res.attackerTroopLoss * zLoss;
         a.troops = troops;
         if (target) target.removeTroops(res.defenderTroopLoss);
         // the living who die fighting the dead rise again
         if (this.horde) {
-          if (target === this.horde) this.zombieConvert(attacker, res.attackerTroopLoss * zLoss);
-          else if (attacker === this.horde && target) this.zombieConvert(target, res.defenderTroopLoss);
+          if (target === this.horde) { this.zombieConvert(attacker, res.attackerTroopLoss * zLoss, true); this.sampleKills(attacker, res.defenderTroopLoss); }
+          else if (attacker === this.horde && target) { this.zombieConvert(target, res.defenderTroopLoss); this.sampleKills(target, res.attackerTroopLoss); }
         }
         const mech = target ? this.mechAtTile(tile) : null;
         if (mech && mech.owner === target) { // troops overrunning a mech chip it and get mauled
@@ -1004,7 +1005,7 @@ class Game {
     a.markY += (bestY - a.markY) * FRONT_SMOOTHING;
   }
   handleDeadDefender(attacker, target) {
-    if (target.tiles.size === 0 || target.tiles.size >= this.config.conquerThresholdTiles()) return;
+    if (target.isHorde || target.tiles.size === 0 || target.tiles.size >= this.config.conquerThresholdTiles()) return;   // the dead are never "conquered": every tile has to be taken
     this.conquerPlayer(attacker, target);
   }
   conquerPlayer(conqueror, target) {
@@ -1090,11 +1091,11 @@ class Game {
     for (const [k, r] of this.allianceRequests) if (this.tick - r.tick > this.config.allianceRequestTimeoutTicks()) this.allianceRequests.delete(k);
   }
   donate(from, to, troops, gold) {
-    if (!from.alive || !to.alive || !from.allies.has(to.id)) return false;
+    if (!from.alive || !to.alive || from === to || !from.isFriendly(to) || to.isHorde) return false;   // allies and teammates
     troops = Math.max(0, Math.floor(troops || 0)); gold = Math.max(0, Math.floor(gold || 0));
     const t = from.removeTroops(troops); to.addTroops(t);
     const g = from.removeGold(gold); to.addGold(g, 'donation');
-    if (t > 0 || g > 0) this.events.push({ k: 'donate', from: from.smallID, to: to.smallID, troops: t, gold: g });
+    if (t > 0 || g > 0) this.events.push({ k: 'donate', from: from.smallID, rcv: to.smallID, troops: t, gold: g });
     return true;
   }
 
@@ -1141,7 +1142,7 @@ class Game {
       width: this.width, height: this.height, numLand: this.numLand, mapName: this.map.name,
       terrain: this.b64(this.terrain), owner: this.b64(this.owner), fallout: this.b64(this.fallout), walls: this.b64(this.wallHp),
       players: this.players.map((p) => this.playerInfo(p)),
-      stats: this.statsPacket(), units: this.unitsPacket(viewer), mechs: this.mechsPacket(), rails: this.railsPacket(), roads: this.roadsPacket(), teams: this.teamsPacket(), winnerTeam: this.winnerTeam || 0, zombie: this.zombiePacket(), history: this.phase === 'over' ? this.historyPacket() : null,
+      stats: this.statsPacket(), units: this.unitsPacket(viewer), mechs: this.mechsPacket(), rails: this.railsPacket(), roads: this.roadsPacket(), teams: this.teamsPacket(), winnerTeam: this.winnerTeam || 0, zombie: this.zombiePacket(), spores: this.zombie ? this.sporesPacket() : [], history: this.phase === 'over' ? this.historyPacket() : null,
       research: RESEARCH, settings: this.settings, winner: this.winner ? this.winner.smallID : 0,
     };
   }
@@ -1228,8 +1229,8 @@ class Game {
     ]);
   }
   r1(v) { return Math.round(v * 10) / 10; }
-  boatsPacket() { return this.boats.filter((b) => !b.done).map((b) => [b.id, b.owner.smallID, this.r1(b.x), this.r1(b.y), Math.floor(b.troops), b.target ? b.target.smallID : 0, b.infected ? 1 : 0]); }
-  tradePacket() { return this.tradeShips.filter((s) => !s.done).map((s) => [s.id, s.owner.smallID, this.r1(s.x), this.r1(s.y), s.infected ? 1 : 0]); }
+  boatsPacket() { return this.boats.filter((b) => !b.done).map((b) => [b.id, b.owner.smallID, this.r1(b.x), this.r1(b.y), Math.floor(b.troops), b.target ? b.target.smallID : 0]); }
+  tradePacket() { return this.tradeShips.filter((s) => !s.done).map((s) => [s.id, s.owner.smallID, this.r1(s.x), this.r1(s.y)]); }
   shipsPacket(viewer) {
     const out = [];
     for (const w of this.warships) if (!w.done) out.push([w.id, 'warship', w.owner.smallID, this.r1(w.x), this.r1(w.y), Math.round(w.hp), w.maxHp || this.config.warshipHp(), w.patrol, 0, 0, w.level || 1, w.refit ? 1 : 0]);
@@ -1280,6 +1281,7 @@ class Game {
     if (this.phase === 'over') { pkt.winner = this.winner ? this.winner.smallID : 0; pkt.winnerTeam = this.winnerTeam || 0; if (!this.historySent) { this.historySent = true; pkt.history = this.historyPacket(); } }
     if (this.settings.doomsdayClock && this.tick % 10 === 0) pkt.doom = Math.round(this.doomBar() * 1000) / 10;
     if (this.zombie && (this.tick % 10 === 0 || this.phase === 'over')) pkt.zombie = this.zombiePacket();
+    if (this.zombie && (this.spores.length || this.tick % 10 === 0)) pkt.spores = this.sporesPacket();
     if (this.tick % 10 === 0 && this.settings.overtimeMinutes > 0) pkt.winPct = this.winPercent();
     const reqs = [];
     for (const r of this.allianceRequests.values()) if (r.to.type === PlayerType.HUMAN) reqs.push([r.from.smallID, r.to.id]);

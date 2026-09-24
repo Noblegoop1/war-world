@@ -124,7 +124,6 @@ module.exports = {
     p.removeTroops(Math.min(p.troops, Math.floor(troops / R.boatCapacity(p))));
     const pts = resamplePath(this, path, 1);
     const boat = { id: newId(), owner: p, target, troops, pts, idx: 0, dst, done: false, x: pts[0].x, y: pts[0].y, hp: 1 };
-    this.maybeInfectShip(boat, this.tileAt(boat.x, boat.y), 12);   // zombie mode: leaving from near zombie land
     p.boats.push(boat);
     this.boats.push(boat);
     return boat;
@@ -138,7 +137,7 @@ module.exports = {
       b.done = true;
       const dst = b.dst;
       const ownerNow = this.ownerOf(dst);
-      if (ownerNow === b.owner || (ownerNow && (b.owner.isFriendly(ownerNow) || !this.canAttack(b.owner, ownerNow)))) { b.owner.addTroops(b.troops); this.shipLanded(b, dst); continue; }
+      if (ownerNow === b.owner || (ownerNow && (b.owner.isFriendly(ownerNow) || !this.canAttack(b.owner, ownerNow)))) { b.owner.addTroops(b.troops); continue; }
       let landing = Math.floor(b.troops * R.landingBonus(b.owner));
       // Coastal Defense Network: landings near a defense post get shredded
       if (ownerNow && ownerNow.researches.has('coastal_defense') && this.hasDefensePostNearby(ownerNow, dst)) landing = Math.floor(landing * 0.7);
@@ -147,7 +146,6 @@ module.exports = {
       b.owner.addTroops(landing);
       this.sendAttack(b.owner, ownerNow, landing, dst);
       if (ownerNow) this.handleDeadDefender(b.owner, ownerNow);
-      this.shipLanded(b, dst);   // an infected boat brings the plague ashore with it
     }
     if (this.boats.some((b) => b.done)) {
       this.boats = this.boats.filter((b) => !b.done);
@@ -176,9 +174,7 @@ module.exports = {
         if (!path) continue;
         const forward = this.dist(path[0], port.tile) <= this.dist(path[path.length - 1], port.tile);
         const pts = resamplePath(this, forward ? path : [...path].reverse(), 1);
-        const ship = { id: newId(), owner: port.owner, dstPort, pts, idx: 0, x: pts[0].x, y: pts[0].y, done: false, dist: path.length, hp: 1 };
-        this.maybeInfectShip(ship, port.tile, 20);
-        this.tradeShips.push(ship);
+        this.tradeShips.push({ id: newId(), owner: port.owner, dstPort, pts, idx: 0, x: pts[0].x, y: pts[0].y, done: false, dist: path.length, hp: 1 });
       }
     }
     for (const s of this.tradeShips) {
@@ -187,7 +183,6 @@ module.exports = {
       if (!this.advanceAlong(s, cfg.tradeShipSpeed())) continue;
       s.done = true;
       const dstOwner = s.dstPort.owner;
-      if (s.infected) this.shipLanded(s, s.dstPort.tile);
       if (dstOwner === s.owner) continue;
       // allies trade on better terms: the diplomat's income
       const base = cfg.tradeShipGold(s.dist) * (s.owner.isFriendly(dstOwner) ? cfg.alliedTradeBonus() : 1);

@@ -445,6 +445,7 @@ function startGame(m) {
   G.teams = new Map((s.teams || []).map(([id, name, color]) => [id, { id, name, color }]));
   G.doom = 0; G.winPct = 0;
   G.zombie = s.zombie || null;
+  G.spores = s.spores || [];
   G.labels = new Map(); G.lastLabelTick = -100;
   spectating = false; placement = null; pinnedCard = 0;
   $('spectate-banner').classList.add('hidden');
@@ -588,7 +589,7 @@ function applyStats(stats) {
     p.team = s[22] || 0;         // team games: team id
     p.doomed = s[23] ?? -1;      // doomsday clock: seconds since this side fell under the bar (-1 = safe)
     const zc = s[24];            // zombie mode: [samples, cure steps done, [step, ticks left, total] | null]
-    p.samples = zc ? zc[0] : 0; p.cureStep = zc ? zc[1] : 0; p.cureRun = zc ? zc[2] : null;
+    p.samples = zc ? zc[0] : 0; p.cureStep = zc ? zc[1] : 0; p.cureRun = zc ? zc[2] : null; p.cureNeed = zc ? zc[3] : 0;
     p.researches = r[0] || []; p.researching = r[1];
     p.borrowed = r[2] || [];     // [[doctrine, lender smallID]]: doctrines an ally is lending this nation
     p.atk = s[9] || 0; p.eco = s[10] || 0; p.walls = s[11] || 0; p.mechCount = s[12] || 0; p.warshipCount = s[13] || 0; p.subCount = s[14] || 0;
@@ -642,7 +643,8 @@ function applyTick(m) {
   if (m.history) { G.history = m.history; renderWorldHistory(); }
   if (m.winnerTeam !== undefined) G.winnerTeam = m.winnerTeam;
   if (m.doom !== undefined) G.doom = m.doom;
-  if (m.zombie) G.zombie = m.zombie;   // [phase, ticks to next, horde smallID, hive tiles, wave [target, ticks, x, y], result, level name, how it ended]
+  if (m.zombie) G.zombie = m.zombie;
+  if (m.spores) G.spores = m.spores;   // [id, x, y, target x, target y, target smallID, troops]   // [phase, ticks to next, horde smallID, hive tiles, wave [target, ticks, x, y], result, level name, how it ended]
   if (m.winPct !== undefined) G.winPct = m.winPct;
   if (prevPhase !== 'over' && G.phase === 'over') showGameOver();
   if (prevPhase === 'spawn' && G.phase === 'play') renderBanner();
@@ -679,7 +681,7 @@ function handleEvent(e) {
     case 'allyRejected': logEvent(`${esc(pname(e.by))} rejected your alliance request`); break;
     case 'allied': logEvent(`${esc(pname(e.a))} and ${esc(pname(e.b))} are now allies`, (mine(e.a) || mine(e.b)) ? 'good' : ''); break;
     case 'betrayed': logEvent(`${esc(pname(e.by))} betrayed ${esc(pname(e.p))}!`, mine(e.p) ? 'bad' : ''); break;
-    case 'donate': logEvent(`${esc(pname(e.from))} sent ${e.troops ? fmt(e.troops) + ' troops' : ''}${e.troops && e.gold ? ' and ' : ''}${e.gold ? fmt(e.gold) + ' gold' : ''} to ${esc(pname(e.to))}`, mine(e.to) ? 'good' : ''); break;
+    case 'donate': logEvent(`${esc(pname(e.from))} sent ${e.troops ? fmt(e.troops) + ' troops' : ''}${e.troops && e.gold ? ' and ' : ''}${e.gold ? fmt(e.gold) + ' gold' : ''} to ${esc(pname(e.rcv))}`, mine(e.rcv) ? 'good' : mine(e.from) ? 'good' : ''); break;
     case 'trade': logEvent(`Trade ship arrived: +${fmt(e.gold)} gold (with ${esc(pname(e.p))})`, 'good'); break;
     case 'train': logEvent(`Train delivered +${fmt(e.gold)} gold (to ${esc(pname(e.p))})`, 'good'); break;
     case 'win': logEvent(`🏆 ${esc(pname(e.p))} won the game!`, mine(e.p) ? 'good' : ''); break;
@@ -692,6 +694,11 @@ function handleEvent(e) {
     case 'doomed': if (e.p === G.me) logEvent(`☠ The doomsday clock has caught you: hold ${e.bar}% of the land within a minute or lose your troops, then your land`, 'bad'); break;
     case 'doomLifted': if (e.p === G.me) logEvent('The doomsday clock has let you go — for now', 'good'); break;
     case 'allianceExpired': if (e.a === G.me || e.b === G.me) logEvent(`Your alliance with ${esc(pname(e.a === G.me ? e.b : e.a))} has run its course (ask again to renew)`, ''); break;
+    case 'sporeCloud': if (e.p === G.me) logEvent('☣ A spore cloud is drifting toward you - SAMs shoot them down', 'bad'); G.effects.push({ x: e.x, y: e.y, r: 10, t0: performance.now(), dur: 1500, ring: true }); break;
+    case 'sporeDown': logEvent(`🎯 ${esc(pname(e.by))} shot down a spore cloud`, e.by === G.me ? 'good' : ''); G.effects.push({ x: e.x - 0.5, y: e.y - 0.5, r: 8, t0: performance.now(), dur: 900 }); break;
+    case 'sporeLanding': logEvent('☣ A spore cloud landed - a new hive is growing', 'bad'); G.effects.push({ x: e.x, y: e.y, r: 20, t0: performance.now(), dur: 2500, ring: true }); break;
+    case 'hordeRage': if (e.rage >= 3) logEvent(`☣ The bombs are enraging the horde (rage ×${e.rage})`, ''); break;
+    case 'immune': logEvent(`💉 ${esc(pname(e.p))} is immune - the horde can't feed on them any more`, e.p === G.me ? 'good' : ''); break;
     case 'apocalypse': logEvent(`☣ <b>The dead are rising</b> (${esc(e.diff)}). Survive ${e.mins} minutes - or cure it.`, 'bad'); break;
     case 'outbreak': G.effects.push({ x: e.x, y: e.y, r: 30, t0: performance.now(), dur: 2500, ring: true }); if (e.size === 'hive') logEvent('☣ A hive has opened in the wilds', 'bad'); break;
     case 'spore': logEvent('☣ A hive has spread its spores - a new outbreak on another shore', 'bad'); G.effects.push({ x: e.x, y: e.y, r: 25, t0: performance.now(), dur: 2500, ring: true }); break;
@@ -702,7 +709,7 @@ function handleEvent(e) {
     case 'raft': if (e.p === G.me) logEvent('☣ Zombie rafts are heading for your coast', 'bad'); break;
     case 'hiveBurned': logEvent(`🔥 ${e.by ? esc(pname(e.by)) + ' burned' : 'Someone burned'} a hive${e.by === G.me ? ' (+150 samples, +400K gold)' : ''}`, 'good'); G.effects.push({ x: e.x, y: e.y, r: 20, t0: performance.now(), dur: 1800 }); break;
     case 'cureStart': if (e.p === G.me) logEvent(`💉 Cure step ${e.step} under way`, 'good'); break;
-    case 'cureStep': logEvent(`💉 ${esc(pname(e.p))} finished cure step ${e.step}${e.step >= 3 ? ' - THE CURE!' : ''}`, e.p === G.me ? 'good' : ''); break;
+    case 'cureStep': if (e.step < 3) logEvent(`💉 ${esc(pname(e.p))} finished cure step ${e.step}`, e.p === G.me ? 'good' : ''); break;
     case 'cureLost': if (e.p === G.me) logEvent('💉 Your lab is gone - the cure research with it', 'bad'); break;
     case 'cured': logEvent(`💉 <b>The world is cured</b>${e.p ? ' by ' + esc(pname(e.p)) : ''}. ${e.survivors} nations survived - now grab what you can!`, 'good'); break;
     case 'hordeWiped': logEvent(`☣ <b>The horde is wiped out.</b> ${e.survivors} nations survived - land rush!`, 'good'); break;
@@ -717,14 +724,14 @@ function handleEvent(e) {
       }
       break;
     case 'shareGranted':
-      if (e.to === G.me) logEvent(`🔬 ${esc(pname(e.by))} lends you <b>${esc(researchName(e.id))}</b>`, 'good');
-      else if (e.by === G.me) logEvent(`🔬 You lend ${esc(pname(e.to))} <b>${esc(researchName(e.id))}</b>`, 'good');
+      if (e.rcv === G.me) logEvent(`🔬 ${esc(pname(e.by))} lends you <b>${esc(researchName(e.id))}</b>`, 'good');
+      else if (e.by === G.me) logEvent(`🔬 You lend ${esc(pname(e.rcv))} <b>${esc(researchName(e.id))}</b>`, 'good');
       break;
     case 'shareEnded':
-      if (e.to === G.me) logEvent(`🔬 <b>${esc(researchName(e.id))}</b> went back to ${esc(pname(e.by))}${e.reason === 'revoked' ? ' (they took it back)' : e.reason === 'alliance' ? ' (the alliance ended)' : ''}`, '');
-      else if (e.by === G.me) logEvent(`🔬 ${esc(pname(e.to))} no longer borrows your <b>${esc(researchName(e.id))}</b>${e.reason === 'returned' ? ' (they handed it back)' : ''}`, '');
+      if (e.rcv === G.me) logEvent(`🔬 <b>${esc(researchName(e.id))}</b> went back to ${esc(pname(e.by))}${e.reason === 'revoked' ? ' (they took it back)' : e.reason === 'alliance' ? ' (the alliance ended)' : ''}`, '');
+      else if (e.by === G.me) logEvent(`🔬 ${esc(pname(e.rcv))} no longer borrows your <b>${esc(researchName(e.id))}</b>${e.reason === 'returned' ? ' (they handed it back)' : ''}`, '');
       break;
-    case 'shareDenied': if (e.to === G.me) logEvent(`${esc(pname(e.by))} won't lend you ${esc(researchName(e.id))}`, 'bad'); break;
+    case 'shareDenied': if (e.rcv === G.me) logEvent(`${esc(pname(e.by))} won't lend you ${esc(researchName(e.id))}`, 'bad'); break;
     case 'shareOwned': if (e.p === G.me) logEvent(`You researched <b>${esc(researchName(e.id))}</b> yourself - it is yours now`, 'good'); break;
     case 'swarm': if (e.p === G.me) logEvent(`${esc(pname(e.by))} sent ${fmt(e.troops)} troops at your Mech!`, 'bad'); else if (e.by === G.me) logEvent(`${fmt(e.troops)} troops are running at ${esc(pname(e.p))}'s Mech`, 'good'); break;
     case 'swarmHit':
@@ -799,7 +806,8 @@ const HISTORY_TEXT = {
   outbreak: (_a, _b, x) => [`☣ An outbreak${x ? ' of ' + x : ''} - the dead are rising`, 'bad'],
   hordeWave: (_a, b) => [`☣ A great wave of the horde broke over ${b || 'the living'}`, 'bad'],
   cureStep: (a, _b, x) => [`💉 ${a} finished cure step ${x}`, 'good'],
-  cured: (a) => [`💉 The cure: ${a ? a + ' ended the plague' : 'the plague has burned out'}`, 'big'],
+  immune: (a) => [`💉 ${a} became immune to the plague`, 'good'],
+  sporeLanding: () => ['☣ A spore cloud crossed the sea and a new hive took root', 'bad'],
   hordeWiped: () => ['☣ The horde has been wiped out', 'big'],
   rebelled: (a, b) => [`${a} broke away from ${b}`, 'bad'],
 };
@@ -825,8 +833,8 @@ function renderZombieResult() {
   if (!res.length) { $('game-over-title').textContent = '☣ The dead inherit the earth'; $('game-over-text').textContent = 'Nobody survived the horde.'; el.innerHTML = ''; return; }
   const iWon = res[0][0] === G.me, iLived = res.some(([sm]) => sm === G.me);
   $('game-over-title').textContent = iWon ? '🏆 Full victory - strongest survivor' : iLived ? '☣ You survived' : 'Game over';
-  $('game-over-text').textContent = `${pname(res[0][0])} is the strongest nation left standing. ${res.length} survived the ${G.zombie[6] || 'horde'}${G.zombie[7] === 'cured' ? ' (cured)' : G.zombie[7] === 'wiped' ? ' (wiped out)' : ''}.`;
-  el.innerHTML = '<table class="zr-table"><tr><td><b>Survivor</b></td><td><b>Strength</b></td></tr>' + res.map(([sm, sc], i) => `<tr class="${i === 0 ? 'win' : ''}"><td>${i === 0 ? '🏆 ' : ''}${esc(pname(sm))}${p && sm === G.me ? ' (you)' : ''}</td><td>${fmt(sc)}</td></tr>`).join('') + '</table><div class="muted small-text">Strength: land first, then troops, gold, buildings, and what you did against the plague (cure steps, samples; +1500 for curing the world).</div>';
+  $('game-over-text').textContent = `${pname(res[0][0])} is the strongest nation left standing. ${res.length} survived the ${G.zombie[6] || 'horde'}${G.zombie[7] === 'wiped' ? ' (and wiped it out)' : ''}.`;
+  el.innerHTML = '<table class="zr-table"><tr><td><b>Survivor</b></td><td><b>Strength</b></td></tr>' + res.map(([sm, sc], i) => `<tr class="${i === 0 ? 'win' : ''}"><td>${i === 0 ? '🏆 ' : ''}${esc(pname(sm))}${p && sm === G.me ? ' (you)' : ''}</td><td>${fmt(sc)}</td></tr>`).join('') + '</table><div class="muted small-text">Strength: land first, then troops, gold, buildings, and what you did against the plague (cure steps and samples; +600 for immunity).</div>';
 }
 function winnerLabel() { const t = G.teams && G.teams.get(G.winnerTeam); return t ? 'Team ' + t.name : pname(G.winner); }
 function renderBanner() {
@@ -836,8 +844,9 @@ function renderBanner() {
   else if (G.zombie && G.phase === 'play') {
     const [zp, next, , , wave] = G.zombie;
     const pz = me();
-    let txt = zp === 'calm' ? `☣ The dead rise in ${fmtClock(next)} - build walls, posts and a lab`
-      : zp === 'outbreak' ? `☣ Survive ${fmtClock(next)}${wave ? ` · A great wave hits ${esc(pname(wave[0]))} in ${fmtClock(wave[1])}` : ''}`
+    const rage = G.zombie[8] || 0;
+    let txt = zp === 'calm' ? `☣ The dead rise in ${fmtClock(next)} - build walls, posts, SAMs and a lab`
+      : zp === 'outbreak' ? `☣ Survive ${fmtClock(next)}${rage >= 1 ? ` · Horde rage ×${rage}` : ''}${wave ? ` · A great wave hits ${esc(pname(wave[0]))} in ${fmtClock(wave[1])}` : ''}`
       : zp === 'aftermath' ? `The plague is over - land rush! Final count in ${fmtClock(next)}` : '';
     if (pz && wave && wave[0] === G.me) txt = `☣ A GREAT WAVE IS COMING FOR YOU in ${fmtClock(wave[1])} - get behind your walls`;
     b.textContent = txt; b.classList.toggle('hidden', !txt);
@@ -934,16 +943,16 @@ function renderCurePanel() {
   if (!el) return;
   if (!G.zombie || !p || !p.alive || G.zombie[0] === 'over') { el.classList.add('hidden'); return; }
   const step = p.cureStep || 0;
-  const need = [0, 0, Math.ceil(G.numLand * 0.004), Math.ceil(G.numLand * 0.012)];
-  const names = ['', 'Isolate the Strain', 'Vaccine Trials', 'Mass Inoculation'];
+  const names = ['', 'Isolate the Strain', 'Vaccine Trials', 'Immunity'];
   let html = `<div class="cp-row"><b>💉 Cure</b><span>step ${step}/3 · ${fmt(p.samples || 0)} samples</span></div>`;
   if (p.cureRun) {
     const [s, left, total] = p.cureRun;
     html += `<div class="cp-row"><span>${names[s]}</span><span class="rp-time">${fmtClock(left)}</span></div><div class="rp-bar"><div style="width:${(100 * (1 - left / Math.max(1, total))).toFixed(1)}%"></div></div>`;
   } else if (step < 3 && G.zombie[0] === 'outbreak') {
-    const n = step + 1, ok = (p.samples || 0) >= need[n];
-    html += `<div class="cp-row"><span>Next: ${names[n]}${need[n] ? ` (${fmt(need[n])} samples)` : ''}</span><button id="cure-go" ${ok ? '' : 'disabled'} title="${ok ? 'Research it in your best lab (runs alongside doctrines)' : 'Take back zombie land for samples'}">Research</button></div>`;
-  } else if (step >= 3) html += '<div class="muted">You cured the world.</div>';
+    const n = step + 1, need = p.cureNeed || 0, ok = (p.samples || 0) >= need;
+    html += `<div class="cp-row"><span>Next: ${names[n]}${need ? ` (${fmt(need)} samples)` : ''}</span><button id="cure-go" ${ok ? '' : 'disabled'} title="${ok ? 'Research it in your best lab (runs alongside doctrines)' : 'Samples come from killing zombies (1 per 3,000) and taking back their land'}">Research</button></div>`;
+    html += `<div class="muted small-text">${['Fewer of your dead rise; the creep can\'t take ground near your cities.', 'Half as many of your dead rise; your attacks on the horde lose 20% fewer.', 'Immune: none of your dead rise, the creep can\'t touch you, the horde can\'t feed on you.'][n - 1]}</div>`;
+  } else if (step >= 3) html += '<div class="muted">You are immune.</div>';
   el.innerHTML = html;
   el.classList.remove('hidden');
   const go = $('cure-go'); if (go) go.onclick = () => send({ t: 'cure' });
@@ -1191,11 +1200,9 @@ function playerAction(sm, act) {
   const p = me();
   switch (act) {
     case 'ally': send({ t: 'ally', p: sm }); toast('Alliance request sent', true); break;
-    case 'war':
-      if (confirm(`Declare war on ${pname(sm)}?\n\nYour attacks on them carry 15% more troops, but your gold income drops by 20% while the war lasts (at least 60 seconds).`)) send({ t: 'declareWar', p: sm });
-      break;
+    case 'war': send({ t: 'declareWar', p: sm }); break;
     case 'peace': send({ t: 'makePeace', p: sm }); break;
-    case 'break': if (confirm(`Break the alliance with ${pname(sm)}? You will be marked as a traitor for 30s.`)) send({ t: 'breakAlly', p: sm }); break;
+    case 'break': send({ t: 'breakAlly', p: sm }); break;
     case 'donateT': send({ t: 'donate', p: sm, troops: Math.floor(p.troops * 0.1) }); break;
     case 'donateG': send({ t: 'donate', p: sm, gold: Math.floor(p.gold * 0.1) }); break;
     case 'shareAsk': openSharePicker(sm, 'ask'); break;
@@ -2114,6 +2121,18 @@ function draw() {
       ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fillStyle = 'rgba(60,110,30,0.55)'; ctx.fill();
       ctx.strokeStyle = '#8fe04a'; ctx.lineWidth = 2; ctx.stroke();
       ctx.font = `bold ${Math.round(r * 1.2)}px system-ui, sans-serif`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#d7ffb3'; ctx.fillText('☣', x, y + 1);
+    }
+    for (const c of G.spores || []) {
+      const [id, cx, cy, tx, ty, target, troops] = c;
+      const [lx, ly] = lerpPos('spore' + id, cx, cy);
+      const [x, y] = toScreen(lx, ly), [gx, gy] = toScreen(tx + 0.5, ty + 0.5);
+      ctx.setLineDash([6, 6]); ctx.strokeStyle = target === G.me ? 'rgba(143,224,74,0.9)' : 'rgba(143,224,74,0.35)'; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(gx, gy); ctx.stroke(); ctx.setLineDash([]);
+      ctx.beginPath(); ctx.arc(gx, gy, clamp(4 * cam.zoom, 8, 26), 0, Math.PI * 2); ctx.stroke();
+      const r = clamp(3 * cam.zoom, 8, 22);
+      for (let k = 0; k < 6; k++) { const a = k * 1.05 + now / 700; ctx.beginPath(); ctx.arc(x + Math.cos(a) * r * 0.55, y + Math.sin(a) * r * 0.45, r * 0.55, 0, Math.PI * 2); ctx.fillStyle = 'rgba(120,190,70,0.45)'; ctx.fill(); }
+      ctx.font = 'bold 11px system-ui, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom'; ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+      ctx.strokeText('☣ ' + fmt(troops), x, y - r); ctx.fillStyle = '#d7ffb3'; ctx.fillText('☣ ' + fmt(troops), x, y - r);
     }
     if (wave) {
       const [x, y] = toScreen(wave[2] + 0.5, wave[3] + 0.5);
