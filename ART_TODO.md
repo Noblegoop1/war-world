@@ -81,6 +81,11 @@ colour** in pure grey **RGB 180,180,180**, the **darker border colour** in **RGB
 * Missile trails are procedural lines (grey smoke for single bombs, orange sparks for cluster bomblets,
   white-hot streaks for MIRV warheads, cyan for submarine missiles). Real exhaust/smoke sprites and a
   MIRV separation flash would sell it.
+* Zombie mode: hives are a green circle with the ☣ glyph; zombie land is a procedural green speckle;
+  the great-wave marker is a dashed green ring; infected ships get a green ring; the horde-strength cards use
+  ☣ glyphs. Wanted: a hive sprite (animated, 32×32), a zombie-land texture/overlay, a wave-incoming icon, a
+  cure (syringe) icon for the cure panel, and a horde flag for the leaderboard.
+* World history lines use emoji (🤝 🗡 ⚔ 🕊 ☠ ☢ 💉 ☣) as event icons.
 * Swarms (troops running at a mech) are drawn as a cluster of coloured dots with a count; mech barges as
   a brown hull ellipse under the mech; airport roads as grey lines with a dashed centre line and the
   runway as a dark strip. All placeholders.

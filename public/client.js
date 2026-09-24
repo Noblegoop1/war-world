@@ -153,11 +153,11 @@ const UNIT_INFO = {
   city: { label: 'City', key: '1', desc: '+250K max troops. Build on it again to upgrade. Joins the rail network when a Factory is in range.', cost: (n) => Math.min(1e6, Math.pow(2, n) * 125000) },
   port: { label: 'Port', key: '2', desc: 'Sea coast only. Sends trade ships to other nations\' ports for gold; launches Warships.', cost: (n) => Math.min(1e6, Math.pow(2, n) * 125000) },
   factory: { label: 'Factory', key: '3', desc: 'Lays rail to every City/Port/Factory/Lab within 110 tiles and runs trains that pay gold on arrival (25K from other nations, 35K allies). Upgrade to level 2 to build Mechs — higher levels make tougher, longer-ranged Mechs.', cost: (n) => Math.min(1e6, Math.pow(2, n) * 125000) },
-  defense: { label: 'Defense Post', key: '4', desc: 'Attackers within 30 tiles lose 5x troops and advance 3x slower. Shells enemy ships within 75 tiles.', cost: (n) => Math.min(250000, (n + 1) * 50000) },
-  silo: { label: 'Missile Silo', key: '5', desc: 'Launches atom / hydrogen bombs (90 tick reload) and Bomber strikes.', cost: () => 1000000 },
+  defense: { label: 'Defense Post', key: '4', desc: 'Attackers within 30 tiles lose 5x troops and advance 3x slower; your border and walls in range are 1.5x harder again. A post near the coast shells enemy warships. Join posts up to 50 tiles apart with a wall for 30% off it (the gold rings show the reach while you place one).', cost: (n) => Math.min(600000, (n + 1) * 75000) },
+  silo: { label: 'Missile Silo', key: '5', desc: 'Launches atom / hydrogen bombs (90 tick reload) and Bomber strikes.', cost: () => 1500000 },
   sam: { label: 'SAM Launcher', key: '6', desc: 'Shoots down nukes within 70 tiles.', cost: (n) => Math.min(3e6, (n + 1) * 1500000) },
-  lab: { label: 'Research Lab', key: '7', desc: 'Needs 3 Cities, must be within rail range of a Factory and away from Cities. Offers 3 random doctrines; pick one (60s). Max 2 per game.', cost: () => 1000000 },
-  wall: { label: 'Wall', key: '8', desc: 'Click-and-drag a line on your land: a 3-tile-thick wall, built block by block (slowest build). Snaps to the coast. Enemies must grind it down and can\'t pass behind it. Price climbs steeply. Nukes raze it.', cost: () => 0 },
+  lab: { label: 'Research Lab', key: '7', desc: 'Needs 3 Cities, must be within rail range of a Factory and away from Cities. Offers 3 random doctrines; each takes 3-5 minutes. Each lab is worth two doctrines; every extra lab costs 5x the last.', cost: (n) => 1000000 * Math.pow(5, n) },
+  wall: { label: 'Wall', key: '8', desc: 'Click-and-drag a line on your land: a 3-tile-thick wall, built block by block (slowest build). Enemies must grind it down and can\'t pass behind it; zombies barely scratch it. Start or end it on one of your Defense Posts and keep it within 50 tiles for 30% off (an end drawn near a post snaps onto it); walls inside a post\'s range are 1.5x harder to break. Price climbs steeply. Nukes raze it.', cost: () => 0 },
   mech: { label: 'Mech', key: '9', desc: 'From a level-2 Factory. Guards your land by default: when an attack hits, it drives to that front on your roads, shells the attacking army and holds the ground around it (nothing within 6 tiles can be taken while it stands). Send it into an enemy while you attack them and it leads the push: your troops near it take ground twice as fast for half the losses, and the ground it stomps becomes yours. Crosses water on a slow barge. Counter: swarm it with troops, artillery, bombers, nukes.', cost: (n) => 2000000 + n * 2500000 },
   warship: { label: 'Warship', key: '0', desc: 'Needs a Port. Click water to set its patrol area (100 tiles): it hunts enemy boats, trade ships and warships with shells. Built at its Port\u2019s level (+35% health, +25% damage per level). You may field 3, plus 1 for every level-3 Port (2 for a level-4). Click it, then water, to move it.', cost: (n) => Math.min(1e6, (n + 1) * 250000) },
   submarine: { label: 'Submarine', key: '', desc: 'Invisible unless within 10 tiles of an enemy warship. Every 90s fires 3 missiles that each wreck one structure in 80 tiles and ignore SAMs.', cost: (n) => Math.min(2.5e6, (n + 1) * 625000), needs: 'submarine_warfare' },
@@ -259,6 +259,7 @@ function fillMapSelect() {
 function syncOptionsView() {
   const el = settingsForm.elements;
   $('teams-block').classList.toggle('hidden', !(el.mode && el.mode.value === 'teams'));
+  $('zombie-block').classList.toggle('hidden', !(el.mode && el.mode.value === 'zombie'));
   for (const v of settingsForm.querySelectorAll('.sl-val')) {
     const k = v.dataset.for, input = el[k];
     v.textContent = k === 'nations' && el.nationsDefault && el.nationsDefault.checked ? 'MAP DEFAULT' : input ? input.value : '';
@@ -439,9 +440,11 @@ function startGame(m) {
   setUnits(s.units || []);
   G.attacks = []; G.boats = []; G.trade = []; G.nukes = []; G.allyReqs = []; G.effects = [];
   G.winner = s.winner || 0;
+  G.history = s.history || null;
   G.winnerTeam = s.winnerTeam || 0;
   G.teams = new Map((s.teams || []).map(([id, name, color]) => [id, { id, name, color }]));
   G.doom = 0; G.winPct = 0;
+  G.zombie = s.zombie || null;
   G.labels = new Map(); G.lastLabelTick = -100;
   spectating = false; placement = null; pinnedCard = 0;
   $('spectate-banner').classList.add('hidden');
@@ -546,6 +549,12 @@ function paintTile(i) {
     d[k] = edge ? 88 : 62; d[k + 1] = edge ? 88 : 62; d[k + 2] = edge ? 96 : 70; d[k + 3] = 255;
     return;
   }
+  if (p.type === 'zombie') {
+    const n = ((i * 2654435761) >>> 0) % 7;
+    if (isBorder(i)) { d[k] = 34; d[k + 1] = 66; d[k + 2] = 24; d[k + 3] = 255; }
+    else { d[k] = 58 + n * 5; d[k + 1] = 92 + n * 7; d[k + 2] = 38 + n * 3; d[k + 3] = n === 0 ? 235 : 190; }
+    return;
+  }
   if (isBorder(i)) {
     // a border tile under one of its owner's defense posts is drawn as pale stone: it costs more
     // troops and more time to take (see defensePostBorderBonus on the server)
@@ -578,7 +587,10 @@ function applyStats(stats) {
     p.power = s[21] || null;     // [troops home, mechs, navy, silos, posts, research x, troops out]
     p.team = s[22] || 0;         // team games: team id
     p.doomed = s[23] ?? -1;      // doomsday clock: seconds since this side fell under the bar (-1 = safe)
+    const zc = s[24];            // zombie mode: [samples, cure steps done, [step, ticks left, total] | null]
+    p.samples = zc ? zc[0] : 0; p.cureStep = zc ? zc[1] : 0; p.cureRun = zc ? zc[2] : null;
     p.researches = r[0] || []; p.researching = r[1];
+    p.borrowed = r[2] || [];     // [[doctrine, lender smallID]]: doctrines an ally is lending this nation
     p.atk = s[9] || 0; p.eco = s[10] || 0; p.walls = s[11] || 0; p.mechCount = s[12] || 0; p.warshipCount = s[13] || 0; p.subCount = s[14] || 0;
     p.deployed = s[15] || 0; p.airships = s[16] || 0; p.airshipsBuilt = s[17] || 0; p.maxResearch = s[18] || 2;
     p.spawned = !!(s[4] & 1); p.alive = !!(s[4] & 2); p.traitor = !!(s[4] & 4); p.offline = !!(s[4] & 8);
@@ -627,13 +639,15 @@ function applyTick(m) {
   if (m.me) applyPrivate(m.me);
   if (m.events) for (const e of m.events) handleEvent(e);
   if (m.winner !== undefined) G.winner = m.winner;
+  if (m.history) { G.history = m.history; renderWorldHistory(); }
   if (m.winnerTeam !== undefined) G.winnerTeam = m.winnerTeam;
   if (m.doom !== undefined) G.doom = m.doom;
+  if (m.zombie) G.zombie = m.zombie;   // [phase, ticks to next, horde smallID, hive tiles, wave [target, ticks, x, y], result, level name, how it ended]
   if (m.winPct !== undefined) G.winPct = m.winPct;
   if (prevPhase !== 'over' && G.phase === 'over') showGameOver();
   if (prevPhase === 'spawn' && G.phase === 'play') renderBanner();
   if (m.stats || m.attacks) renderHud();
-  if (G.phase === 'spawn') renderBanner();
+  if (G.phase === 'spawn' || m.zombie || m.doom !== undefined || m.winPct !== undefined) renderBanner();
 }
 
 // =============================================================================
@@ -678,6 +692,40 @@ function handleEvent(e) {
     case 'doomed': if (e.p === G.me) logEvent(`☠ The doomsday clock has caught you: hold ${e.bar}% of the land within a minute or lose your troops, then your land`, 'bad'); break;
     case 'doomLifted': if (e.p === G.me) logEvent('The doomsday clock has let you go — for now', 'good'); break;
     case 'allianceExpired': if (e.a === G.me || e.b === G.me) logEvent(`Your alliance with ${esc(pname(e.a === G.me ? e.b : e.a))} has run its course (ask again to renew)`, ''); break;
+    case 'apocalypse': logEvent(`☣ <b>The dead are rising</b> (${esc(e.diff)}). Survive ${e.mins} minutes - or cure it.`, 'bad'); break;
+    case 'outbreak': G.effects.push({ x: e.x, y: e.y, r: 30, t0: performance.now(), dur: 2500, ring: true }); if (e.size === 'hive') logEvent('☣ A hive has opened in the wilds', 'bad'); break;
+    case 'spore': logEvent('☣ A hive has spread its spores - a new outbreak on another shore', 'bad'); G.effects.push({ x: e.x, y: e.y, r: 25, t0: performance.now(), dur: 2500, ring: true }); break;
+    case 'shipOutbreak': logEvent('☣ An infected ship brought the plague ashore', 'bad'); G.effects.push({ x: e.x, y: e.y, r: 12, t0: performance.now(), dur: 2000, ring: true }); break;
+    case 'waveWarn': logEvent(`☣ A great wave is gathering - it will hit <b>${esc(pname(e.p))}</b> in ${e.secs}s`, mine(e.p) ? 'bad' : ''); break;
+    case 'hordeWave': logEvent(`☣ The great wave breaks over <b>${esc(pname(e.p))}</b>`, mine(e.p) ? 'bad' : ''); break;
+    case 'finalWave': logEvent('☣ <b>THE DEAD COME FROM EVERY DIRECTION</b> - one more minute!', 'bad'); break;
+    case 'raft': if (e.p === G.me) logEvent('☣ Zombie rafts are heading for your coast', 'bad'); break;
+    case 'hiveBurned': logEvent(`🔥 ${e.by ? esc(pname(e.by)) + ' burned' : 'Someone burned'} a hive${e.by === G.me ? ' (+150 samples, +400K gold)' : ''}`, 'good'); G.effects.push({ x: e.x, y: e.y, r: 20, t0: performance.now(), dur: 1800 }); break;
+    case 'cureStart': if (e.p === G.me) logEvent(`💉 Cure step ${e.step} under way`, 'good'); break;
+    case 'cureStep': logEvent(`💉 ${esc(pname(e.p))} finished cure step ${e.step}${e.step >= 3 ? ' - THE CURE!' : ''}`, e.p === G.me ? 'good' : ''); break;
+    case 'cureLost': if (e.p === G.me) logEvent('💉 Your lab is gone - the cure research with it', 'bad'); break;
+    case 'cured': logEvent(`💉 <b>The world is cured</b>${e.p ? ' by ' + esc(pname(e.p)) : ''}. ${e.survivors} nations survived - now grab what you can!`, 'good'); break;
+    case 'hordeWiped': logEvent(`☣ <b>The horde is wiped out.</b> ${e.survivors} nations survived - land rush!`, 'good'); break;
+    case 'survivedPlague': logEvent(`⌛ <b>You held out.</b> The dead are rotting away; ${e.survivors} nations survived - land rush!`, 'good'); break;
+    case 'shareAsk':
+      if (e.to === net.id) {
+        const d = e.id;
+        logEvent(`<b>${esc(pname(e.from))}</b> asks to borrow your <b>${esc(researchName(d))}</b>`, 'req', [
+          { label: 'Lend it', cls: 'primary', onClick: () => send({ t: 'shareReply', p: e.from, accept: true }) },
+          { label: 'Decline', onClick: () => send({ t: 'shareReply', p: e.from, accept: false }) },
+        ]);
+      }
+      break;
+    case 'shareGranted':
+      if (e.to === G.me) logEvent(`🔬 ${esc(pname(e.by))} lends you <b>${esc(researchName(e.id))}</b>`, 'good');
+      else if (e.by === G.me) logEvent(`🔬 You lend ${esc(pname(e.to))} <b>${esc(researchName(e.id))}</b>`, 'good');
+      break;
+    case 'shareEnded':
+      if (e.to === G.me) logEvent(`🔬 <b>${esc(researchName(e.id))}</b> went back to ${esc(pname(e.by))}${e.reason === 'revoked' ? ' (they took it back)' : e.reason === 'alliance' ? ' (the alliance ended)' : ''}`, '');
+      else if (e.by === G.me) logEvent(`🔬 ${esc(pname(e.to))} no longer borrows your <b>${esc(researchName(e.id))}</b>${e.reason === 'returned' ? ' (they handed it back)' : ''}`, '');
+      break;
+    case 'shareDenied': if (e.to === G.me) logEvent(`${esc(pname(e.by))} won't lend you ${esc(researchName(e.id))}`, 'bad'); break;
+    case 'shareOwned': if (e.p === G.me) logEvent(`You researched <b>${esc(researchName(e.id))}</b> yourself - it is yours now`, 'good'); break;
     case 'swarm': if (e.p === G.me) logEvent(`${esc(pname(e.by))} sent ${fmt(e.troops)} troops at your Mech!`, 'bad'); else if (e.by === G.me) logEvent(`${fmt(e.troops)} troops are running at ${esc(pname(e.p))}'s Mech`, 'good'); break;
     case 'swarmHit':
       G.effects.push({ x: e.x - 0.5, y: e.y - 0.5, r: 5, t0: performance.now(), dur: 700 });
@@ -736,11 +784,64 @@ function syncAllyRequests(list) {
 // HUD
 // =============================================================================
 // "Team Red" in team games, the player's name otherwise.
+// The story of the game, one line per event, on the game-over screen.
+const HISTORY_TEXT = {
+  allied: (a, b) => [`🤝 ${a} and ${b} became allies`, 'good'],
+  betrayed: (a, b) => [`🗡 ${a} betrayed ${b}`, 'bad'],
+  warDeclared: (a, b) => [`⚔ ${a} declared war on ${b}`, 'bad'],
+  peace: (a, b) => [`🕊 ${a} made peace with ${b}`, 'good'],
+  death: (a, b) => [`☠ ${a} fell${b ? ' to ' + b : ''}`, 'bad'],
+  nuke: (a, b, x) => [`☢ ${a} dropped ${x === 'hydrogen' ? 'a hydrogen bomb' : x === 'cluster' ? 'a cluster strike' : 'an atom bomb'} on ${b || 'the wilds'}`, 'bad'],
+  doomed: (a) => [`⌛ The doomsday clock caught ${a}`, 'bad'],
+  shareGranted: (a, b, x) => [`🔬 ${a} lent ${b} ${researchName(x)}`, 'good'],
+  allianceExpired: (a, b) => [`${a} and ${b} let their alliance lapse`, ''],
+  win: (a, _b, x) => [`🏆 ${x && G.teams && G.teams.get(x) ? 'Team ' + G.teams.get(x).name : a} won`, 'big'],
+  outbreak: (_a, _b, x) => [`☣ An outbreak${x ? ' of ' + x : ''} - the dead are rising`, 'bad'],
+  hordeWave: (_a, b) => [`☣ A great wave of the horde broke over ${b || 'the living'}`, 'bad'],
+  cureStep: (a, _b, x) => [`💉 ${a} finished cure step ${x}`, 'good'],
+  cured: (a) => [`💉 The cure: ${a ? a + ' ended the plague' : 'the plague has burned out'}`, 'big'],
+  hordeWiped: () => ['☣ The horde has been wiped out', 'big'],
+  rebelled: (a, b) => [`${a} broke away from ${b}`, 'bad'],
+};
+function renderWorldHistory() {
+  const el = $('world-history');
+  if (!el) return;
+  const h = G.history || [];
+  if (!h.length) { el.innerHTML = '<div class="muted">Nothing worth writing down happened.</div>'; return; }
+  el.innerHTML = h.map(([t, k, a, b, x]) => {
+    const f = HISTORY_TEXT[k];
+    if (!f) return '';
+    const [txt, tone] = f(a ? esc(a[1]) : '', b ? esc(b[1]) : '', x);
+    return `<div class="wh ${tone}"><span class="wh-t">${fmtClock(t)}</span><span>${txt}</span></div>`;
+  }).join('');
+}
+// Zombie mode: the two results - who survived, and the strongest survivor (the full victory).
+function renderZombieResult() {
+  const el = $('game-over-extra');
+  if (!el) return;
+  if (!G.zombie || !G.zombie[5]) { el.innerHTML = ''; return; }
+  const res = G.zombie[5];
+  const p = me();
+  if (!res.length) { $('game-over-title').textContent = '☣ The dead inherit the earth'; $('game-over-text').textContent = 'Nobody survived the horde.'; el.innerHTML = ''; return; }
+  const iWon = res[0][0] === G.me, iLived = res.some(([sm]) => sm === G.me);
+  $('game-over-title').textContent = iWon ? '🏆 Full victory - strongest survivor' : iLived ? '☣ You survived' : 'Game over';
+  $('game-over-text').textContent = `${pname(res[0][0])} is the strongest nation left standing. ${res.length} survived the ${G.zombie[6] || 'horde'}${G.zombie[7] === 'cured' ? ' (cured)' : G.zombie[7] === 'wiped' ? ' (wiped out)' : ''}.`;
+  el.innerHTML = '<table class="zr-table"><tr><td><b>Survivor</b></td><td><b>Strength</b></td></tr>' + res.map(([sm, sc], i) => `<tr class="${i === 0 ? 'win' : ''}"><td>${i === 0 ? '🏆 ' : ''}${esc(pname(sm))}${p && sm === G.me ? ' (you)' : ''}</td><td>${fmt(sc)}</td></tr>`).join('') + '</table><div class="muted small-text">Strength: land first, then troops, gold, buildings, and what you did against the plague (cure steps, samples; +1500 for curing the world).</div>';
+}
 function winnerLabel() { const t = G.teams && G.teams.get(G.winnerTeam); return t ? 'Team ' + t.name : pname(G.winner); }
 function renderBanner() {
   const b = $('phase-banner');
   if (G.phase === 'spawn') { b.textContent = `Choose your spawn — click on land · ${Math.ceil(G.spawnLeft / 10)}s`; b.classList.remove('hidden'); }
   else if (G.phase === 'over') { b.textContent = `Game over — ${winnerLabel()} won`; b.classList.remove('hidden'); }
+  else if (G.zombie && G.phase === 'play') {
+    const [zp, next, , , wave] = G.zombie;
+    const pz = me();
+    let txt = zp === 'calm' ? `☣ The dead rise in ${fmtClock(next)} - build walls, posts and a lab`
+      : zp === 'outbreak' ? `☣ Survive ${fmtClock(next)}${wave ? ` · A great wave hits ${esc(pname(wave[0]))} in ${fmtClock(wave[1])}` : ''}`
+      : zp === 'aftermath' ? `The plague is over - land rush! Final count in ${fmtClock(next)}` : '';
+    if (pz && wave && wave[0] === G.me) txt = `☣ A GREAT WAVE IS COMING FOR YOU in ${fmtClock(wave[1])} - get behind your walls`;
+    b.textContent = txt; b.classList.toggle('hidden', !txt);
+  }
   else if (G.doom > 0 || G.winPct > 0) {
     const parts = [];
     if (G.doom > 0) parts.push(`☠ Doomsday: hold ${G.doom}% of the land or be the leader`);
@@ -799,6 +900,7 @@ function renderHud() {
     rate.classList.toggle('peace', !!gi[3]);
   }
   renderResearchPanel();
+  renderCurePanel();
   $('ratio-label').textContent = `⚔ ${Math.round(ratio * 100)}% (${fmt(p.troops * ratio)})`;
   renderLeaderboard();
   renderAttacks();
@@ -821,9 +923,30 @@ function renderLeaderboard() {
     const i = sorted.indexOf(q) + 1;
     const team = q.team && G.teams ? G.teams.get(q.team) : null;
     const marks = (team ? ` <span class="team-dot" style="background:${team.color}" title="Team ${esc(team.name)}"></span>` : '') + (p && p.allies.includes(q.sm) && !(team && p.team === q.team) ? ' 🤝' : '') + (q.traitor ? ' 🗡' : '') + (q.offline ? ' ⛔' : '') + (q.doomed >= 0 ? ' ☠' : '');
+    if (q.type === 'zombie') return `<tr class="lb-horde" data-sm="${q.sm}"><td>${i}</td><td>☣</td><td>${esc(q.name)}</td><td>${(100 * q.tiles / G.numLand).toFixed(1)}%</td><td>${fmt(q.troops)}</td><td></td></tr>`;
     return `<tr class="${q === p ? 'me' : ''} ${q.alive ? '' : 'dead'}" data-sm="${q.sm}"><td>${i}</td><td>${flagBadge(q)}</td><td>${esc(q.name)}${marks}</td><td>${(100 * q.tiles / G.numLand).toFixed(1)}%</td><td>${fmt(q.troops)}</td><td>${fmt(q.gold)}</td></tr>`;
   }).join('');
   $('leaderboard').querySelectorAll('tr[data-sm]').forEach((tr) => { tr.onclick = () => { const sm = Number(tr.dataset.sm); pinnedCard = sm; renderPlayerCard(sm, true); centerOn(sm); }; });
+}
+// Zombie mode: the cure track, next to your research.
+function renderCurePanel() {
+  const el = $('cure-panel'), p = me();
+  if (!el) return;
+  if (!G.zombie || !p || !p.alive || G.zombie[0] === 'over') { el.classList.add('hidden'); return; }
+  const step = p.cureStep || 0;
+  const need = [0, 0, Math.ceil(G.numLand * 0.004), Math.ceil(G.numLand * 0.012)];
+  const names = ['', 'Isolate the Strain', 'Vaccine Trials', 'Mass Inoculation'];
+  let html = `<div class="cp-row"><b>💉 Cure</b><span>step ${step}/3 · ${fmt(p.samples || 0)} samples</span></div>`;
+  if (p.cureRun) {
+    const [s, left, total] = p.cureRun;
+    html += `<div class="cp-row"><span>${names[s]}</span><span class="rp-time">${fmtClock(left)}</span></div><div class="rp-bar"><div style="width:${(100 * (1 - left / Math.max(1, total))).toFixed(1)}%"></div></div>`;
+  } else if (step < 3 && G.zombie[0] === 'outbreak') {
+    const n = step + 1, ok = (p.samples || 0) >= need[n];
+    html += `<div class="cp-row"><span>Next: ${names[n]}${need[n] ? ` (${fmt(need[n])} samples)` : ''}</span><button id="cure-go" ${ok ? '' : 'disabled'} title="${ok ? 'Research it in your best lab (runs alongside doctrines)' : 'Take back zombie land for samples'}">Research</button></div>`;
+  } else if (step >= 3) html += '<div class="muted">You cured the world.</div>';
+  el.innerHTML = html;
+  el.classList.remove('hidden');
+  const go = $('cure-go'); if (go) go.onclick = () => send({ t: 'cure' });
 }
 function renderResearchPanel() {
   const p = me(), el = $('research-panel');
@@ -1017,10 +1140,24 @@ function playerCardHtml(sm) {
   if (q.subCount && (q.sm === G.me || (p && p.allies.includes(q.sm)))) uhtml += `<span title="Submarines">🌊 ${q.subCount} sub</span>`;
   if (q.walls) uhtml += `<span title="Wall tiles"><img src="${iconURL.build || ''}" alt="">${q.walls} wall</span>`;
   if (uhtml) html += `<div class="pc-units">${uhtml}</div>`;
-  const rs = (q.researches || []).map((id) => `<span class="rs done" data-rid="${esc(id)}">${esc(researchName(id))}</span>`).join('');
+  const loans = new Map(q.borrowed || []);
+  const rs = (q.researches || []).map((id) => loans.has(id)
+    ? `<span class="rs done lent" data-rid="${esc(id)}" title="Lent by ${esc(pname(loans.get(id)))}">${esc(researchName(id))} ⇄</span>`
+    : `<span class="rs done" data-rid="${esc(id)}">${esc(researchName(id))}</span>`).join('');
   const rp = q.researching ? `<span class="rs prog">${esc(researchName(q.researching[0]))} · ${Math.ceil(q.researching[1] / 10)}s</span>` : '';
   if (rs || rp) html += `<div class="pc-research">🔬 ${rs}${rp}</div>`;
-  if (p && p.alive && q.alive && p.sm !== sm) {
+  if (G.zombie && q.type !== 'zombie' && q.type !== 'bot') html += `<div class="pc-share">☣ ${fmt(q.samples || 0)} samples · cure step ${q.cureStep || 0}/3${q.cureRun ? ' (researching)' : ''}</div>`;
+  if (q.type === 'zombie') html += `<div class="pc-share">☣ The dead. They make no deals and never stop. Take their land back for salvage and samples; walls and defense posts hold them.</div>`;
+  if (p && p.alive && q.alive && p.sm !== sm && p.allies.includes(sm) && q.type !== 'bot') {
+    const lendsMe = (p.borrowed || []).find(([, lender]) => lender === sm);
+    const iLend = (q.borrowed || []).find(([, lender]) => lender === p.sm);
+    html += `<div class="pc-share">🔬 `
+      + (lendsMe ? `They lend you <b>${esc(researchName(lendsMe[0]))}</b> <button data-act="shareReturn" class="small">Hand back</button>` : `<button data-act="shareAsk" class="small">Ask to borrow a doctrine</button>`)
+      + ' · '
+      + (iLend ? `You lend them <b>${esc(researchName(iLend[0]))}</b> <button data-act="shareRevoke" class="small">Take back</button>` : `<button data-act="shareLend" class="small">Lend them a doctrine</button>`)
+      + '</div>';
+  }
+  if (p && p.alive && q.alive && p.sm !== sm && q.type !== 'zombie') {
     html += `<div class="pc-actions">`;
     if (p.allies.includes(sm)) html += `<button data-act="donateT">Donate 10% troops</button><button data-act="donateG">Donate 10% gold</button><button data-act="break" class="danger">Break alliance</button>`;
     else {
@@ -1061,9 +1198,30 @@ function playerAction(sm, act) {
     case 'break': if (confirm(`Break the alliance with ${pname(sm)}? You will be marked as a traitor for 30s.`)) send({ t: 'breakAlly', p: sm }); break;
     case 'donateT': send({ t: 'donate', p: sm, troops: Math.floor(p.troops * 0.1) }); break;
     case 'donateG': send({ t: 'donate', p: sm, gold: Math.floor(p.gold * 0.1) }); break;
+    case 'shareAsk': openSharePicker(sm, 'ask'); break;
+    case 'shareLend': openSharePicker(sm, 'lend'); break;
+    case 'shareRevoke': send({ t: 'shareRevoke', p: sm }); break;
+    case 'shareReturn': send({ t: 'shareReturn', p: sm }); break;
     case 'focus': centerOn(sm); break;
     case 'close': pinnedCard = 0; $('player-card').classList.add('hidden'); break;
   }
+}
+// Pick a doctrine to ask an ally for (one of theirs you lack) or to lend them (one of yours they lack).
+// Borrowed doctrines can't be passed on, and each of you lends the other at most one at a time.
+function openSharePicker(sm, mode) {
+  const p = me(), q = G.players.get(sm);
+  if (!p || !q) return;
+  const own = (x) => (x.researches || []).filter((id) => !(x.borrowed || []).some(([b]) => b === id));
+  const list = mode === 'ask' ? own(q).filter((id) => !(p.researches || []).includes(id)) : own(p).filter((id) => !(q.researches || []).includes(id));
+  const el = $('share-picker');
+  const title = mode === 'ask' ? `Ask ${esc(q.name)} to lend you a doctrine` : `Lend ${esc(q.name)} one of your doctrines`;
+  const note = mode === 'ask' ? 'They decide. A loan works exactly like your own research until it is taken back or the alliance ends.' : 'One at a time. Take it back whenever you like - it costs nothing.';
+  el.innerHTML = `<div class="sp-head"><b>${title}</b><button class="icon-btn" id="sp-close">✕</button></div><div class="muted small-text">${note}</div>`
+    + (list.length ? list.map((id) => { const d = RESEARCH_DEFS.find((r) => r.id === id); return `<button class="sp-item" data-id="${esc(id)}"><b>${esc(researchName(id))}</b><span>${d ? fxMarkup(d.short) : ''}</span></button>`; }).join('')
+      : `<div class="muted" style="padding:8px 0">${mode === 'ask' ? 'They have nothing you are missing.' : 'You have nothing they are missing.'}</div>`);
+  el.classList.remove('hidden');
+  $('sp-close').onclick = () => el.classList.add('hidden');
+  el.querySelectorAll('.sp-item').forEach((b) => { b.onclick = () => { send({ t: mode === 'ask' ? 'shareAsk' : 'shareLend', p: sm, id: b.dataset.id }); el.classList.add('hidden'); }; });
 }
 function centerOn(sm) {
   const l = G.labels.get(sm);
@@ -1096,6 +1254,8 @@ function showGameOver() {
   const won = G.winner === G.me || (G.winnerTeam && mine && mine.team === G.winnerTeam);
   $('game-over-title').textContent = won ? '🏆 Victory!' : 'Game over';
   $('game-over-text').textContent = `${winnerLabel()} won the game.`;
+  renderWorldHistory();
+  renderZombieResult();
   $('btn-back-lobby').textContent = isHost() ? 'End game & back to lobby' : 'Back to lobby';
 }
 $('btn-spectate').onclick = () => $('game-over').classList.add('hidden');
@@ -1167,6 +1327,7 @@ const MECH_MODES = [
   { id: 'roam', icon: 'boat', label: 'Roam border', desc: 'Walk your own border, favouring the stretch nearest a hostile neighbour.' },
 ];
 function mechById(id) { return G.mechs.find((m) => m[0] === id); }
+const WALL_LINK_MAX = 50;        // config wallLinkMaxLength
 const SWARM_DMG = 0.03;          // health a swarming troop takes off a mech (config swarmDamagePerTroop)
 const MECH_HOLD_RADIUS = 6;      // config mechHoldRadius
 // ---- Info panel: the server computes the numbers, we just lay them out and refresh ----
@@ -1310,7 +1471,8 @@ function openRadial(tile, sx, sy) {
         items.push({ icon: 'donateTroop', label: 'Donate troops', onClick: () => { playerAction(o, 'donateT'); closeRadial(); } });
         items.push({ icon: 'donateGold', label: 'Donate gold', onClick: () => { playerAction(o, 'donateG'); closeRadial(); } });
         items.push({ icon: 'traitor', label: 'Break alliance', onClick: () => { playerAction(o, 'break'); closeRadial(); } });
-      } else {
+        items.push({ icon: 'info', label: 'Share research', title: 'Ask to borrow one of their doctrines, or lend them one of yours', onClick: () => { closeRadial(); pinnedCard = o; renderPlayerCard(o, true); openSharePicker(o, 'ask'); } });
+      } else if (q.type !== 'zombie') {
         items.push({ icon: 'ally', label: 'Alliance', onClick: () => { playerAction(o, 'ally'); closeRadial(); } });
         if (q.type !== 'bot') {
           if ((p.wars || []).includes(o)) items.push({ icon: 'ally', label: 'Make peace', onClick: () => { playerAction(o, 'peace'); closeRadial(); } });
@@ -1666,6 +1828,26 @@ function draw() {
     }
     ctx.setLineDash([]);
   }
+  // Placing a defense post or drawing a wall shows how far a linked wall can reach from each of your
+  // posts (50 tiles): a wall that starts or ends on a post and fits inside that is 30% cheaper.
+  const postContext = (placement && ((placement.kind === 'build' && placement.unit === 'defense') || placement.kind === 'wall')) || wallDraw;
+  if (postContext) {
+    const myPosts = G.units.filter((u) => u[1] === 'defense' && u[2] === G.me && !(u[5] > 0));
+    const hx = hoverTile >= 0 ? tileX(hoverTile) + 0.5 : -1e9, hy = hoverTile >= 0 ? tileY(hoverTile) + 0.5 : -1e9;
+    ctx.lineWidth = 1.3 / cam.zoom;
+    for (const u of myPosts) {
+      const px = tileX(u[3]) + 0.5, py = tileY(u[3]) + 0.5;
+      const reach = Math.hypot(px - hx, py - hy) <= WALL_LINK_MAX;
+      ctx.strokeStyle = reach ? 'rgba(255, 214, 90, 0.9)' : 'rgba(255, 214, 90, 0.45)';
+      ctx.setLineDash([5 / cam.zoom, 4 / cam.zoom]);
+      ctx.beginPath(); ctx.arc(px, py, WALL_LINK_MAX, 0, Math.PI * 2); ctx.stroke();
+      ctx.setLineDash([]);
+      // placing a new post: a line to every post it could be joined to with a discounted wall
+      if (reach && placement && placement.kind === 'build' && placement.unit === 'defense') {
+        ctx.strokeStyle = 'rgba(255, 214, 90, 0.8)'; ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(hx, hy); ctx.stroke();
+      }
+    }
+  }
   if (mechContext) {
     ctx.lineWidth = 1.2 / cam.zoom;
     for (const mch of G.mechs) {
@@ -1785,9 +1967,10 @@ function draw() {
     ctx.drawImage(c, x - s / 2, y - s / 2, s, s);
     return [x, y];
   };
-  for (const s of G.trade) drawSprite('trade', s[1], s[2], s[3], 1.2, 'trade' + s[0]);
+  for (const s of G.trade) { const pos = drawSprite('trade', s[1], s[2], s[3], 1.2, 'trade' + s[0]); if (s[4] && pos) { ctx.strokeStyle = '#8fe04a'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(pos[0], pos[1], 9, 0, Math.PI * 2); ctx.stroke(); } }
   for (const b of G.boats) {
     const pos = drawSprite('transport', b[1], b[2], b[3], 1.4, 'boat' + b[0]);
+    if (b[6] && pos) { ctx.strokeStyle = '#8fe04a'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(pos[0], pos[1], 10, 0, Math.PI * 2); ctx.stroke(); }   // infected
     if (pos && cam.zoom > 1.2) { ctx.font = `bold ${clamp(4 * cam.zoom, 10, 14)}px system-ui, sans-serif`; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom'; ctx.fillStyle = '#fff'; ctx.strokeStyle = 'rgba(0,0,0,0.8)'; ctx.lineWidth = 3; ctx.strokeText(fmt(b[4]), pos[0], pos[1] - 8); ctx.fillText(fmt(b[4]), pos[0], pos[1] - 8); }
   }
   for (const s of G.ships) {
@@ -1921,6 +2104,26 @@ function draw() {
     drawTrail(pts, lx, ly, '220,220,220', 3);
     drawSprite(type === 'hydrogen' ? 'hydrogen' : 'atom', ownerSm, lx, ly, 1.6);
   }
+  // zombie mode: the hives, and where the next great wave will hit
+  if (G.zombie) {
+    const [, , , hives, wave] = G.zombie;
+    for (const t of hives || []) {
+      const [x, y] = toScreen(tileX(t) + 0.5, tileY(t) + 0.5);
+      if (!visible(x, y)) continue;
+      const r = clamp(6 * cam.zoom, 12, 34) * (1 + 0.08 * Math.sin(now / 250));
+      ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fillStyle = 'rgba(60,110,30,0.55)'; ctx.fill();
+      ctx.strokeStyle = '#8fe04a'; ctx.lineWidth = 2; ctx.stroke();
+      ctx.font = `bold ${Math.round(r * 1.2)}px system-ui, sans-serif`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#d7ffb3'; ctx.fillText('☣', x, y + 1);
+    }
+    if (wave) {
+      const [x, y] = toScreen(wave[2] + 0.5, wave[3] + 0.5);
+      const r = clamp(20 * cam.zoom, 40, 160) * (1 + 0.1 * Math.sin(now / 180));
+      ctx.setLineDash([10, 8]); ctx.strokeStyle = 'rgba(143,224,74,0.9)'; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([]);
+      ctx.font = 'bold 14px system-ui, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom'; ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+      const label = `☣ GREAT WAVE ${fmtClock(wave[1])}`; ctx.strokeText(label, x, y - r - 4); ctx.fillStyle = '#b9f36a'; ctx.fillText(label, x, y - r - 4);
+    }
+  }
   // effects
   G.effects = G.effects.filter((e) => now - e.t0 < e.dur);
   for (const e of G.effects) {
@@ -2002,7 +2205,9 @@ function draw() {
   // wall drawing cost label
   if (wallDraw && wallDraw.quote) {
     const q = wallDraw.quote;
-    const txt = q.ok ? `${q.tiles.length} tiles · ${fmt(q.cost)} gold${q.afford ? '' : ' (not enough gold)'}` : q.reason;
+    const link = q.linked ? ` · −30% (linked to ${q.joins ? 'two defense posts' : 'a defense post'}, was ${fmt(q.fullCost)})`
+      : q.postEnds ? ` · too long for the post discount (${q.length}/${q.maxLink} tiles)` : ' · start on a defense post for −30%';
+    const txt = q.ok ? `${q.tiles.length} tiles · ${fmt(q.cost)} gold${link}${q.afford ? '' : ' (not enough gold)'}` : q.reason;
     ctx.font = 'bold 13px "Segoe UI", system-ui, sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'bottom';
     const w = ctx.measureText(txt).width + 12;
     ctx.fillStyle = q.ok && q.afford ? 'rgba(20,60,20,0.9)' : 'rgba(80,20,20,0.9)';

@@ -74,7 +74,7 @@ module.exports = {
       // anyone left without a team (tribes) is not a side
       return out.map((s) => ({ ...s, tiles: s.players.reduce((a, p) => a + p.tiles.size, 0) }));
     }
-    return this.players.filter((p) => p.alive && p.type !== PlayerType.BOT).map((p) => ({ team: null, players: [p], tiles: p.tiles.size }));
+    return this.players.filter((p) => p.alive && p.type !== PlayerType.BOT && !p.isHorde).map((p) => ({ team: null, players: [p], tiles: p.tiles.size }));
   },
   // Land share needed to win right now (overtime lowers it over time).
   winPercent() {
@@ -124,6 +124,7 @@ module.exports = {
         if (!q || !p.allies.has(id)) continue;
         p.allies.delete(id); q.allies.delete(p.id);
         if (q.allianceSince) q.allianceSince.delete(p.id);
+        this.endSharing(p, q);
         this.events.push({ k: 'allianceExpired', a: p.smallID, b: q.smallID });
       }
     }

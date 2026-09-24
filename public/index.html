@@ -51,6 +51,9 @@
         <li><b>Conquering</b> a nation or tribe pays gold based on its size and treasury.</li>
         <li><b>Click any nation</b> to see its <b>ATK POWER</b> and <b>ECONOMY</b> &mdash; attack power drops while its forces are away fighting. Hover either number for the full breakdown.</li>
         <li><kbd>A</kbd> attack under cursor &middot; <kbd>B</kbd> boat under cursor &middot; <kbd>R</kbd> retaliate against your latest attacker &middot; <kbd>C</kbd> center on you &middot; <kbd>N</kbd>/<kbd>H</kbd> nukes &middot; <kbd>Enter</kbd> chat &middot; <kbd>Esc</kbd> close.</li>
+        <li><b>Walls + posts</b>: a wall that starts or ends on your Defense Post and stays within 50 tiles is 30% cheaper, and walls inside a post's range are harder to break. The gold rings show each post's reach while you place a post or draw a wall.</li>
+        <li><b>Sharing research</b>: on an ally's card, ask to borrow one of their doctrines or lend them one of yours (one each way at a time; the lender can take it back any time).</li>
+        <li><b>Zombie mode</b>: survive the horde. Hives open in the wilds after a short calm; the dead spread, creep over borders and rise from your fallen. Walls, defense posts and mechs hold them; infected ships and rafts carry them overseas; great waves are announced 30s ahead. Take zombie land back for salvage and samples, research the 3-step cure, and be the strongest nation still standing at the end.</li>
         <li><b>Modes</b>: Free for all or Teams (2&ndash;7 teams, Duos/Trios/Quads, Humans vs Nations). Teammates are permanent allies and win together. The host can also switch on Random spawn, Water nukes, a Doomsday clock, a game length, overtime, a gold multiplier, alliance duration, and switch off any unit.</li>
         <li><b>Win</b> by owning 80% of the land (configurable; in Teams your team's land counts together). A player squeezed under 100 tiles is conquered outright.</li>
       </ul>
@@ -101,7 +104,24 @@
           <div class="opt-grid three">
             <label class="opt-card wide"><input type="radio" name="mode" value="ffa"><span class="opt-label">FREE FOR ALL</span></label>
             <label class="opt-card wide"><input type="radio" name="mode" value="teams"><span class="opt-label">TEAMS</span></label>
-            <label class="opt-card wide soon" title="The Zombie mode is next on the list"><input type="radio" name="mode" value="zombie" disabled><span class="opt-label">ZOMBIE</span><span class="opt-tag">COMING NEXT</span></label>
+            <label class="opt-card wide zombie"><input type="radio" name="mode" value="zombie"><span class="opt-label">☣ ZOMBIE</span><span class="opt-tag">SURVIVE THE HORDE</span></label>
+          </div>
+          <div id="zombie-block" class="hidden">
+            <div class="opt-sub">THE HORDE</div>
+            <div class="opt-grid four">
+              <label class="opt-card diff zd"><input type="radio" name="zombieDifficulty" value="easy"><span class="skulls"><i class="on bio">☣</i><i class="">☣</i><i class="">☣</i><i class="">☣</i></span><span class="opt-label">SHAMBLERS</span><span class="opt-blurb">2 hives · 25 min · slow and beatable</span></label>
+              <label class="opt-card diff zd"><input type="radio" name="zombieDifficulty" value="medium"><span class="skulls"><i class="on bio">☣</i><i class="on bio">☣</i><i class="">☣</i><i class="">☣</i></span><span class="opt-label">OUTBREAK</span><span class="opt-blurb">3 hives · 30 min · spores and waves</span></label>
+              <label class="opt-card diff zd"><input type="radio" name="zombieDifficulty" value="hard"><span class="skulls"><i class="on bio">☣</i><i class="on bio">☣</i><i class="on bio">☣</i><i class="">☣</i></span><span class="opt-label">PANDEMIC</span><span class="opt-blurb">4 hives · 35 min · few will make it</span></label>
+              <label class="opt-card diff zd"><input type="radio" name="zombieDifficulty" value="nightmare"><span class="skulls"><i class="on bio">☣</i><i class="on bio">☣</i><i class="on bio">☣</i><i class="on bio">☣</i></span><span class="opt-label">EXTINCTION</span><span class="opt-blurb">5 hives · 40 min · good luck</span></label>
+            </div>
+            <div class="opt-help muted small-text">
+              A minute or three after the spawn, the dead rise at hives in the wilderness and spread like an attack that belongs to nobody.
+              The living who die fighting them join them; their infection creeps over borders (walls, defense posts, mechs and the cure's first step hold it)
+              and zombies barely scratch walls. Infected ships start new outbreaks where they land, the horde sends rafts, and great waves are announced 30s before they hit.
+              Taking zombie land back pays salvage and gives samples; the <b>cure</b> is 3 steps in your labs (steps 2 and 3 need samples) and the first nation to finish it cures the world.
+              When the horde is cured, wiped out or the clock runs out, its land rots back to empty ground for 5 minutes of land rush.
+              <b>Everyone still standing survived; the strongest survivor wins outright.</b> Game length (below) overrides the survival time.
+            </div>
           </div>
           <div id="teams-block" class="hidden">
             <div class="opt-sub">NUMBER OF TEAMS</div>
@@ -174,6 +194,7 @@
     </div>
     <div id="attacks-panel" class="hud hidden"></div>
     <div id="research-panel" class="hud hidden"></div>
+    <div id="cure-panel" class="hud hidden"></div>
   </div>
 
   <!-- top-center: phase banner + hover card -->
@@ -227,10 +248,15 @@
   <div id="toasts"></div>
   <div id="spectate-banner" class="hidden"></div>
 
+  <div id="share-picker" class="hud hidden"></div>
+
   <div id="game-over" class="overlay hidden">
-    <div class="panel">
+    <div class="panel go-panel">
       <h2 id="game-over-title">Game over</h2>
       <p id="game-over-text"></p>
+      <div id="game-over-extra"></div>
+      <h3 class="go-h">World history</h3>
+      <div id="world-history" class="world-history"></div>
       <div class="row">
         <button id="btn-spectate">Keep watching</button>
         <button id="btn-back-lobby" class="primary">Back to lobby</button>

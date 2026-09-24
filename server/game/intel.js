@@ -63,6 +63,7 @@ const WORDS = {
   overextended: 'attacking on several fronts at once', danger: 'a real threat to me', easy_prey: 'weak, next door and unprotected',
   offline: 'its player has disconnected',
   outgrown: 'an ally I have outgrown - far weaker than me', rushing: 'I am going all-in on them',
+  lends_to_me: 'lends me one of its doctrines', borrows_from_me: 'borrows one of my doctrines',
 };
 
 module.exports = {

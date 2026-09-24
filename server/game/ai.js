@@ -4,7 +4,7 @@
 // labs + research (and change behaviour based on what they researched), mechs, warships/subs/mines,
 // choke-point walls, nukes and bombers.
 const { Rng } = require('./rng');
-const { PlayerType, UnitType, NukeType, Difficulty, RESEARCH_BY_ID } = require('./config');
+const { PlayerType, UnitType, NukeType, Difficulty, RESEARCH_BY_ID, within } = require('./config');
 const R = require('./research').effects;
 const { bezierArc, bezierPoint } = require('./path');
 
@@ -30,6 +30,9 @@ const EARLY_GAME_TICKS = 3000;  // the first five minutes: alliances are cheap a
 const OUTGROWN_RATIO = [4, 2.6, 1.9, 1.5];
 // Turns in a row sitting on a full army with nothing to do before a nation forces a decision.
 const IDLE_TURNS_LIMIT = [14, 9, 6, 3];
+const FORTIFY_INTERVAL = [Infinity, 900, 600, 400];   // ticks between fortification steps (easy -> impossible)
+const WALL_FUND_SHARE = [0, 0.15, 0.22, 0.28];        // share of income set aside for linked walls
+const ZOMBIE_PUSH_AT = [0.7, 0.6, 0.5, 0.45];   // troop share at which a nation pushes into zombie land
 const RUSH_TICKS = 1500;                        // a rush keeps sending waves for up to 2.5 minutes
 const RUSH_WAVE_SHARE = [0.4, 0.5, 0.6, 0.7];   // share of the army each wave commits
 // Words that make each choice attractive. A choice's appeal for a nation is the sum of its words'
@@ -108,6 +111,8 @@ class NationAI {
   }
 
   get difficulty() { return this.cfg.difficulty(); }
+  // Zombie mode, before the plague is over: every living nation is on the same side, more or less.
+  get zombieSiege() { const z = this.game.zombie; return !!z && (z.phase === 'calm' || z.phase === 'outbreak'); }
   get hardOrWorse() { return this.difficulty === Difficulty.HARD || this.difficulty === Difficulty.IMPOSSIBLE; }
   get diffIndex() { return { easy: 0, medium: 1, hard: 2, impossible: 3 }[this.difficulty]; }
 
@@ -134,6 +139,7 @@ class NationAI {
     }
     this.observe();
     this.handleAllianceRequests();
+    this.manageSharing();
     this.handleLabs();
     this.handleStructures();
     this.handleNavy();
@@ -212,6 +218,7 @@ class NationAI {
       else if (e.k === 'betrayed' && e.p === me) { this.betrayedBy.add(e.by); this.grudge.set(e.by, 100); }
       else if (e.k === 'nuke' && e.target === me) { this.nukedBy.add(e.by); this.grudge.set(e.by, Math.min(100, (this.grudge.get(e.by) || 0) + 40)); }
       else if (e.k === 'warDeclared' && e.on === me) this.grudge.set(e.by, Math.min(100, (this.grudge.get(e.by) || 0) + 25));
+      else if (e.k === 'raft' && e.p === me) this.raftsSeen = (this.raftsSeen || 0) + 1;
     }
   }
   // Enemy SAMs that would get a shot at a missile landing on this tile.
@@ -282,6 +289,8 @@ class NationAI {
       if (hostile && (nb || sameMass) && (w.has('strong_army') || w.has('aggressive') || attacking || (w.has('nuke_armed') && (this.grudge.get(o.smallID) || 0) > 0))) w.add('danger');
       if (hostile && nb && w.has('weak_army') && !w.has('fortified') && !w.has('walled')) w.add('easy_prey');
       if (p.allies.has(o.id) && o.type !== PlayerType.BOT && o.troops * OUTGROWN_RATIO[d] < p.troops) w.add('outgrown');
+      if (g.lentTo(o, p)) w.add('lends_to_me');
+      if (g.lentTo(p, o)) w.add('borrows_from_me');
       if (this.rush && this.rush.target === o.smallID) w.add('rushing');
       // ---- fold into memory: seen words go to 1, the rest fade ----
       let m = this.mem.get(o.smallID);
@@ -385,6 +394,7 @@ class NationAI {
   // ======================================================================================
   finishMoves() {
     const g = this.game, p = this.p;
+    if (this.zombieSiege) return this.zombieMoves();
     // an active rush keeps sending waves until the target is gone or it stops paying
     if (this.rush) {
       const o = g.playersBySmall[this.rush.target];
@@ -459,7 +469,8 @@ class NationAI {
     for (const a of nb) {
       if (!p.allies.has(a.id) || a.type === PlayerType.BOT || !a.alive || g.sameTeam(p, a)) continue;
       const ratio = myPow / Math.max(1, g.attackPower(a));
-      if (ratio < need || p.troops < a.troops * 1.3) continue;
+      // an ally that shares its research with us has earned a little more patience
+      if (ratio < need * (g.lentTo(a, p) ? 1.3 : 1) || p.troops < a.troops * 1.3) continue;
       // an ally still holding off someone dangerous for us keeps its purpose
       if (a.incomingAttacks.some((x) => !x.done && x.attacker !== p && g.hostile(p, x.attacker) && x.attacker.troops > p.troops * 0.5)) continue;
       const score = ratio * (1 + 0.25 * this.wordSum(a.smallID, cw.want)) / (1 + 0.3 * this.wordSum(a.smallID, cw.avoid)) * (0.5 + a.numTiles / Math.max(1, p.numTiles));
@@ -501,6 +512,7 @@ class NationAI {
   // Declare war when we are committing to a real offensive; make peace when it stops paying.
   manageWars() {
     const g = this.game, p = this.p;
+    if (this.zombieSiege) { for (const [sm] of [...p.warsDeclared]) { const o = g.playersBySmall[sm]; if (o) g.makePeace(p, o); } return; }
     if (this.difficulty === Difficulty.EASY || g.tick < this.warCheckAfter) return;
     this.warCheckAfter = g.tick + 300;
     const cw = CHOICE_WORDS.declareWar;
@@ -593,6 +605,7 @@ class NationAI {
   // Labs: put them deep inside, upgrade the busy one, and open another when the slots run out.
   handleLabs() {
     const g = this.game, p = this.p;
+    if (g.isZombieGame() && g.canStartCure(p).ok) g.startCure(p);   // the cure comes before any doctrine
     if (this.difficulty === Difficulty.EASY || g.tick < this.labCheckAfter) return;
     this.labCheckAfter = g.tick + 150;
     const labs = p.completedUnitsOf(UnitType.LAB);
@@ -675,7 +688,9 @@ class NationAI {
     const { players: neighbors, touchesNeutral } = g.neighborsOf(p);
     neighbors.sort((a, b) => a.troops - b.troops);
     const friends = neighbors.filter((o) => p.isFriendly(o));
-    const enemies = neighbors.filter((o) => !p.isFriendly(o));
+    let enemies = neighbors.filter((o) => !p.isFriendly(o));
+    // zombie siege: the living leave each other alone unless someone starts it
+    if (this.zombieSiege) enemies = enemies.filter((o) => o.isHorde || o.type === PlayerType.BOT || p.incomingAttacks.some((a) => !a.done && a.attacker === o));
     this.manageWars();
     if (this.finishMoves()) return;
     if (this.assistAllies()) return;
@@ -876,6 +891,7 @@ class NationAI {
       const sm = from.smallID, cw = CHOICE_WORDS.seekAlly;
       let accept;
       if (this.wordSum(sm, cw.refuse) >= 1) accept = false;          // traitors, attackers, betrayers
+      else if (this.zombieSiege) accept = !this.betrayedBy.has(sm);   // against the dead, any friend will do
       else if (g.tick < EARLY_GAME_TICKS) accept = p.relation(from) > -20 && !this.rng.chance(5);   // early: take the trade bonus
       // later on an alliance has to be worth something: a partner that can hold its own, a common enemy,
       // or protection while we are under pressure. A weak nation asking a strong one is asking to be eaten.
@@ -886,6 +902,11 @@ class NationAI {
   }
   maybeSendAllianceRequests(enemies) {
     const g = this.game, p0 = this.p;
+    if (this.zombieSiege && this.rng.chance(2)) {
+      const cands = g.players.filter((o) => o !== p0 && o.alive && !o.isHorde && o.type !== PlayerType.BOT && !p0.isFriendly(o) && !this.betrayedBy.has(o.smallID)
+        && (this.believes(o.smallID, 'neighbor') || this.believes(o.smallID, 'same_continent')));
+      if (cands.length) { g.requestAlliance(p0, this.rng.pick(cands)); return; }
+    }
     // Early on, friendly neighbours are worth courting: allied trade pays both sides 75% more.
     if (g.tick < EARLY_GAME_TICKS && this.rng.chance(3)) {
       const cw = CHOICE_WORDS.seekAlly;
@@ -903,11 +924,149 @@ class NationAI {
   // ---- structures --------------------------------------------------------------
   handleStructures() {
     const g = this.game, p = this.p;
+    this.accrueWallFund();
     if (this.placements > 0 && this.tryBuildDefensePost()) return;
     if (this.placements > 0 && this.maybeBuildWall()) return;
+    if (this.placements > 2 && this.fortifyClusters()) return;
     if (g.tick - this.lastStructureTick < 80 / this.buildBias) return;
     const built = this.doHandleStructures();
     if (built) { this.lastStructureTick = g.tick; this.placements++; }
+  }
+  // Where a nation keeps most of its buildings, it rings the place with defense posts no further apart
+  // than a linked wall can reach, then - slowly, as the gold allows - joins neighbouring posts with walls
+  // (30% cheaper that way, and a post makes the wall beside it harder to break). The side facing trouble
+  // gets its posts first. Any two posts facing a hostile border within wall range also get joined.
+  fortifyClusters() {
+    const g = this.game, p = this.p;
+    if (this.difficulty === Difficulty.EASY || g.tick < (this.fortifyAfter || 0) || g.unitDisabled('defense')) return false;
+    this.fortifyAfter = g.tick + FORTIFY_INTERVAL[this.diffIndex] + this.rng.int(0, 60);
+    const cl = this.mainCluster();
+    if (!cl) return false;
+    const link = this.cfg.wallLinkMaxLength();
+    const posts = p.completedUnitsOf(UnitType.DEFENSE_POST);
+    // ---- 1. posts on the ring, trouble side first ----
+    const ringR = Math.max(16, Math.min(46, cl.radius + 12));
+    const n = Math.max(4, Math.ceil((2 * Math.PI * ringR) / (link * 0.8)));
+    const spots = [];
+    for (let i = 0; i < n; i++) {
+      const a = (i / n) * Math.PI * 2;
+      const x = Math.round(cl.x + Math.cos(a) * ringR), y = Math.round(cl.y + Math.sin(a) * ringR);
+      if (!g.valid(x, y)) continue;
+      const t = g.ref(x, y);
+      if (g.owner[t] !== p.smallID || !g.isLand(t)) continue;
+      spots.push({ t, a, danger: this.dangerNear(x, y) });
+    }
+    spots.sort((u, v) => v.danger - u.danger);
+    const hasPost = (t) => posts.some((u) => g.dist(u.tile, t) <= 12) || p.units.some((u) => u.type === UnitType.DEFENSE_POST && g.dist(u.tile, t) <= 12);
+    const postCost = this.cfg.unitCost(UnitType.DEFENSE_POST, p.unitsOf(UnitType.DEFENSE_POST).length, p);
+    for (const s of spots) {
+      if (hasPost(s.t)) continue;
+      if (p.gold < postCost * 2) break;
+      // nudge to a buildable tile nearby
+      for (let k = 0; k < 6; k++) {
+        const t = k === 0 ? s.t : g.ref(within(g.x(s.t) + this.rng.int(-3, 3), 0, g.width - 1), within(g.y(s.t) + this.rng.int(-3, 3), 0, g.height - 1));
+        if (g.owner[t] === p.smallID && g.build(p, UnitType.DEFENSE_POST, t).ok) return true;
+      }
+    }
+    // ---- 2. join two posts with a wall: ring neighbours first, then any pair on a hostile front ----
+    if (g.unitDisabled('wall') || p.wallQueue.length > 1) return false;
+    this.wallLinks ||= new Set();
+    const key = (a, b) => (a.id < b.id ? a.id + '|' + b.id : b.id + '|' + a.id);
+    const pairs = [];
+    for (let i = 0; i < posts.length; i++) {
+      for (let j = i + 1; j < posts.length; j++) {
+        const a = posts[i], b = posts[j], d = g.dist(a.tile, b.tile);
+        if (d > link - 2 || d < 6 || this.wallLinks.has(key(a, b))) continue;
+        // "on the ring" is loose: the cluster's centre drifts as more gets built around it
+        const near = (u) => Math.hypot(g.x(u.tile) - cl.x, g.y(u.tile) - cl.y) <= ringR + 25;
+        const onRing = near(a) && near(b);
+        const danger = this.dangerNear((g.x(a.tile) + g.x(b.tile)) / 2, (g.y(a.tile) + g.y(b.tile)) / 2);
+        if (!onRing && danger < 1) continue;
+        pairs.push({ a, b, score: danger + (onRing ? 1 : 0) - d / 100 });
+      }
+    }
+    pairs.sort((u, v) => v.score - u.score);
+    this.pendingWallCost = 0;
+    // price the best few, then take the best value for money
+    const routes = [];
+    for (const pr of pairs.slice(0, 5)) {
+      const route = this.postWallRoute(pr.a, pr.b, cl);
+      if (!route) { this.wallLinks.add(key(pr.a, pr.b)); continue; }   // no way to join these two: stop trying
+      routes.push({ ...pr, route, value: pr.score * 1e6 - route.quote.cost });
+    }
+    routes.sort((u, v) => v.value - u.value);
+    for (const pr of routes) {
+      const route = pr.route;
+      const cost = route.quote.cost;
+      // paid for out of the wall fund (a slice of everything we earn), or out of pocket if it is cheap
+      if (p.gold >= cost && (this.wallFund >= cost || cost <= p.gold * 0.35)) {
+        if (g.buildWall(p, route.pts).ok) {
+          this.wallFund = Math.max(0, this.wallFund - cost);
+          this.wallLinks.add(key(pr.a, pr.b)); this.lastWallTick = g.tick;
+          return true;
+        }
+      } else if (!this.pendingWallCost) this.pendingWallCost = cost;   // saving up for this one
+    }
+    return false;
+  }
+  // A discounted wall between two posts: straight if it can be, otherwise bent outward (or inward) around
+  // the cities in the way. Null if no route stays linked (within the 50 tiles).
+  postWallRoute(a, b, cl) {
+    const g = this.game, p = this.p;
+    const straight = g.planWall(p, [a.tile, b.tile]);
+    if (straight.ok && straight.linked) return { pts: [a.tile, b.tile], quote: straight };
+    const mx = (g.x(a.tile) + g.x(b.tile)) / 2, my = (g.y(a.tile) + g.y(b.tile)) / 2;
+    const ox = mx - cl.x, oy = my - cl.y, ol = Math.hypot(ox, oy) || 1;
+    for (const push of [8, 14, -8]) {
+      const x = Math.round(mx + (ox / ol) * push), y = Math.round(my + (oy / ol) * push);
+      if (!g.valid(x, y)) continue;
+      const mid = g.ref(x, y);
+      if (g.owner[mid] !== p.smallID) continue;
+      const q = g.planWall(p, [a.tile, mid, b.tile]);
+      if (q.ok && q.linked) return { pts: [a.tile, mid, b.tile], quote: q };
+    }
+    return null;
+  }
+  // A share of every coin earned goes to the wall fund, so the expensive linked walls get built slowly
+  // instead of never (the AI otherwise spends everything as it comes in).
+  accrueWallFund() {
+    const p = this.p;
+    const earned = p.goldEarned - (this.lastEarned ?? p.goldEarned);
+    this.lastEarned = p.goldEarned;
+    if (earned > 0) this.wallFund = Math.min(30e6, (this.wallFund || 0) + earned * WALL_FUND_SHARE[this.diffIndex]);
+  }
+  // The densest group of our buildings: centre and radius (null if we have fewer than three).
+  mainCluster() {
+    const g = this.game, p = this.p;
+    const b = p.units.filter((u) => u.constructionLeft === 0 && u.type !== UnitType.DEFENSE_POST && u.type !== UnitType.MINE && g.isLand(u.tile));
+    if (b.length < 3) return null;
+    let best = null;
+    for (const c of b) {
+      const cx = g.x(c.tile), cy = g.y(c.tile);
+      const members = b.filter((d) => (g.x(d.tile) - cx) ** 2 + (g.y(d.tile) - cy) ** 2 <= 35 * 35);
+      const value = members.reduce((a, d) => a + (d.level || 1) + (d.type === UnitType.CITY ? 1 : 0), 0);
+      if (!best || value > best.value) best = { members, value };
+    }
+    if (!best || best.members.length < 3) return null;
+    const x = best.members.reduce((a, d) => a + g.x(d.tile), 0) / best.members.length;
+    const y = best.members.reduce((a, d) => a + g.y(d.tile), 0) / best.members.length;
+    const radius = Math.max(...best.members.map((d) => Math.hypot(g.x(d.tile) - x, g.y(d.tile) - y)));
+    return { x, y, radius };
+  }
+  // How much hostile ground (and the zombie horde) is near a point: 0 = quiet, higher = closer / more.
+  dangerNear(x, y) {
+    const g = this.game, p = this.p;
+    let d = 0;
+    for (let k = 0; k < 12; k++) {
+      const a = (k / 12) * Math.PI * 2;
+      for (const r of [15, 30, 50]) {
+        const tx = Math.round(x + Math.cos(a) * r), ty = Math.round(y + Math.sin(a) * r);
+        if (!g.valid(tx, ty)) continue;
+        const o = g.ownerOf(g.ref(tx, ty));
+        if (o && o !== p && g.hostile(p, o) && o.type !== PlayerType.BOT) { d += (o.isHorde ? 2 : 1) * (60 - r) / 45; break; }
+      }
+    }
+    return d;
   }
   tryBuildDefensePost() {
     const g = this.game, p = this.p;
@@ -964,6 +1123,8 @@ class NationAI {
   }
   doHandleStructures() {
     const g = this.game, p = this.p;
+    // the wall fund has earned a linked wall: stop spending until the gold is actually there
+    if (this.pendingWallCost && (this.wallFund || 0) >= this.pendingWallCost && p.gold < this.pendingWallCost) return false;
     const cities = p.unitsOf(UnitType.CITY).length;
     const ports = p.unitsOf(UnitType.PORT).length;
     const factories = p.unitsOf(UnitType.FACTORY);
@@ -1256,7 +1417,7 @@ class NationAI {
     if (!ports.length) return;
     const reserve = p.unitsOf(UnitType.SILO).length ? this.cfg.nukeCost(NukeType.ATOM, p) : 0;
     const enemyShipsNear = g.warships.some((w) => !w.done && g.hostile(p, w.owner) && ports.some((u) => g.distXY(g.x(u.tile), g.y(u.tile), w.x, w.y) < 150));
-    const wantW = Math.min(this.cfg.warshipCap(p), (this.hardOrWorse ? 1 : 0) + this.wantWarships + (enemyShipsNear ? 2 : 0) + (p.boats.length ? 1 : 0));
+    const wantW = Math.min(this.cfg.warshipCap(p), (this.hardOrWorse ? 1 : 0) + this.wantWarships + (enemyShipsNear ? 2 : 0) + (p.boats.length ? 1 : 0) + (this.raftsSeen ? 2 : 0));
     const live = p.warships.filter((w) => !w.done).length;
     if (live < wantW && p.gold >= this.cfg.unitCost(UnitType.WARSHIP, p.warships.length, p) + reserve) {
       const pt = this.navalPatrolPoint(ports);
@@ -1423,6 +1584,117 @@ class NationAI {
       else if (m.mode !== 'defend') { const post = this.tileNearThreat(); if (post !== null && post >= 0) give(m, 'defend', 0, post); else give(m, 'defend'); }
     }
   }
+  // ---- zombie mode ----
+  // While the dead walk: push into zombie land when we have the troops (samples for the cure and
+  // salvage gold - and a hive near us is the best target of all), help allies who are being overrun,
+  // and keep the lab on the cure. The walls and posts come from fortifyClusters, which weighs the horde
+  // double when it decides which side of a city needs them.
+  zombieMoves() {
+    const g = this.game, p = this.p, h = g.horde;
+    if (!h || !h.alive || g.zombie.phase !== 'outbreak') return false;
+    const max = this.cfg.maxTroops(p);
+    // allies being overrun get troops if we can spare them
+    if (p.troops > max * 0.5 && this.rng.chance(3)) {
+      for (const o of g.players) {
+        if (o === p || !o.alive || !p.isFriendly(o) || o.type === PlayerType.BOT) continue;
+        const dead = o.incomingAttacks.filter((a) => !a.done && a.attacker === h).reduce((s, a) => s + a.troops, 0);
+        if (dead > o.troops * 1.2) { g.donate(p, o, Math.floor(p.troops * 0.12), 0); return true; }
+      }
+    }
+    const nb = g.neighborsOf(p).players;
+    if (!nb.includes(h)) return false;
+    const underSiege = p.incomingAttacks.some((a) => !a.done && a.attacker === h && a.troops > p.troops * 0.3);
+    const ready = p.troops > max * (underSiege ? 0.3 : ZOMBIE_PUSH_AT[this.diffIndex]);
+    if (!ready || g.tick < (this.zPushAfter || 0)) return false;
+    this.zPushAfter = g.tick + 60;
+    // aim at the nearest hive if one is close, otherwise at the thick of the horde next door
+    let focus = -1, fd = Infinity;
+    const c = g.centroid(p);
+    for (const hv of g.zombie.hives) if (hv.alive && c) { const d = Math.hypot(g.x(hv.tile) - c.x, g.y(hv.tile) - c.y); if (d < fd) { fd = d; focus = hv.tile; } }
+    if (fd > 180) focus = -1;
+    const troops = Math.floor(p.troops * (underSiege ? 0.25 : 0.35));
+    return g.sendAttack(p, h, troops, null, focus >= 0 ? focus : this.chooseFocus(h)) !== null;
+  }
+  zombieNuke() {
+    const g = this.game, p = this.p;
+    if (g.tick < (this.nukeAfter || 0) || !g.zombie || g.zombie.phase !== 'outbreak') return false;
+    const hives = g.zombie.hives.filter((hv) => hv.alive);
+    if (!hives.length) return false;
+    const c = g.centroid(p);
+    if (!c) return false;
+    hives.sort((a, b) => Math.hypot(g.x(a.tile) - c.x, g.y(a.tile) - c.y) - Math.hypot(g.x(b.tile) - c.x, g.y(b.tile) - c.y));
+    const type = p.gold >= this.cfg.nukeCost(NukeType.HYDROGEN, p) * 1.5 ? NukeType.HYDROGEN : NukeType.ATOM;
+    if (g.launchNuke(p, type, hives[0].tile).ok) { this.nukeAfter = g.tick + NUKE_CADENCE[this.diffIndex]; return true; }
+    return false;
+  }
+  // ---- research sharing ----
+  // Lending an ally one of our doctrines is how a nation says "we are friends": economy and defence
+  // doctrines go to anyone we like; war doctrines only to allies weaker than us. We ask allies for
+  // doctrines that answer what we are up against, and take a loan back from an ally we are turning on or
+  // who has grown into a danger. Taking one back costs nothing, so we do it without ceremony.
+  manageSharing() {
+    const g = this.game, p = this.p;
+    if (this.difficulty === Difficulty.EASY || g.tick < (this.shareAfter || 0)) return;
+    this.shareAfter = g.tick + 300 + this.rng.int(0, 200);
+    const allies = g.players.filter((o) => o !== p && o.alive && p.isFriendly(o) && o.type !== PlayerType.BOT);
+    if (!allies.length) return;
+    for (const o of allies) {
+      const id = g.lentTo(p, o);
+      if (!id) continue;
+      const turning = (this.rush && this.rush.target === o.smallID) || p.relation(o) < -20;
+      const risky = this.isWarDoctrine(id) && o.troops > p.troops * 1.5;
+      if (turning || risky) g.endLoan(p, o, 'revoked');
+    }
+    // lend one ally something (the friendlier, the likelier)
+    const order = allies.filter((o) => !g.lentTo(p, o)).sort((a, b) => p.relation(b) - p.relation(a));
+    for (const o of order) {
+      if (p.relation(o) < 0 || (p.relation(o) < 20 && !this.rng.chance(2))) continue;
+      const id = this.bestLoanFor(o);
+      if (id && g.lendDoctrine(p, o, id).ok) break;
+    }
+    // ask for what we need
+    for (const id of this.wantedDoctrines()) {
+      const lender = allies.find((o) => g.ownsDoctrine(o, id) && !g.lentTo(o, p));
+      if (lender && g.askDoctrine(p, lender, id).ok) break;
+    }
+  }
+  isWarDoctrine(id) { const d = RESEARCH_BY_ID[id]; return !!d && d.tags.some((t) => t === 'aggro' || t === 'nuke' || t === 'mech'); }
+  // The doctrine of ours that would help this ally most without making a rival of it.
+  bestLoanFor(o) {
+    const g = this.game, p = this.p;
+    let best = null, bs = -Infinity;
+    for (const id of p.researches) {
+      if (!g.ownsDoctrine(p, id) || o.researches.has(id) || !RESEARCH_BY_ID[id] || id.startsWith('cure_')) continue;
+      const tags = RESEARCH_BY_ID[id].tags;
+      let s = (tags.includes('defense') ? 3 : 0) + (tags.includes('econ') ? 2 : 0) + this.rng.next();
+      if (this.isWarDoctrine(id)) s += o.troops < p.troops * 0.8 ? 1 : -6;
+      if (s > bs) { bs = s; best = id; }
+    }
+    return bs > 0 ? best : null;
+  }
+  // Doctrines we lack that answer the words we hold about the nations threatening us, best first.
+  wantedDoctrines() {
+    const g = this.game, p = this.p;
+    const score = new Map();
+    for (const [o] of this.remembered()) {
+      if (!g.hostile(p, o)) continue;
+      const weight = this.believes(o.smallID, 'danger') ? 2 : this.believes(o.smallID, 'neighbor') ? 1 : 0.4;
+      for (const d of Object.values(RESEARCH_BY_ID)) {
+        if (p.researches.has(d.id) || !d.answers) continue;
+        const s = this.wordSum(o.smallID, d.answers) * weight;
+        if (s > 0) score.set(d.id, (score.get(d.id) || 0) + s);
+      }
+    }
+    return [...score.entries()].filter(([, s]) => s >= 1.5).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([id]) => id);
+  }
+  // An ally asks to borrow one of our doctrines.
+  answerShare(borrower, id) {
+    const p = this.p;
+    if (p.relation(borrower) < -10 || (this.rush && this.rush.target === borrower.smallID)) return false;
+    if (this.believes(borrower.smallID, 'outgrown') && !this.isWarDoctrine(id)) return true;   // harmless help to a small friend
+    if (this.isWarDoctrine(id) && borrower.troops > p.troops * 1.5) return false;               // don't arm a giant
+    return this.difficulty === Difficulty.EASY ? this.rng.chance(2) : true;
+  }
   // An enemy mech inside our country gets dealt with. A battery already on it is enough; otherwise send a
   // swarm big enough to pull it down, if we can spare the troops without opening ourselves up.
   counterMechs() {
@@ -1528,6 +1800,7 @@ class NationAI {
   maybeNuke() {
     const g = this.game, p = this.p;
     if (g.settings.disableNukes || this.difficulty === Difficulty.EASY) return;
+    if (this.zombieSiege) { this.zombieNuke(); return; }
     if (this.strikeClump()) return;
     if (this.difficulty === Difficulty.MEDIUM && !this.rng.chance(Math.max(1, Math.round(3 / this.nukeBias)))) return;
     if (g.tick < (this.nukeAfter || 0)) return;

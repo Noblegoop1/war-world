@@ -3,7 +3,7 @@
 // unit prices, trade income, AI difficulty scaling) so the game plays the same; the code is original.
 
 const TerrainType = { WATER: 0, PLAINS: 1, HIGHLAND: 2, MOUNTAIN: 3 };
-const PlayerType = { HUMAN: 'human', NATION: 'nation', BOT: 'bot' };
+const PlayerType = { HUMAN: 'human', NATION: 'nation', BOT: 'bot', ZOMBIE: 'zombie' };
 const UnitType = { CITY: 'city', PORT: 'port', DEFENSE_POST: 'defense', SILO: 'silo', SAM: 'sam', LAB: 'lab', FACTORY: 'factory', WALL: 'wall', MECH: 'mech', WARSHIP: 'warship', SUBMARINE: 'submarine', MINE: 'mine', ARTILLERY: 'artillery', REPAIR: 'repair', AIRPORT: 'airport' };
 // Fixed structures (live on a tile). Mobile units (mech/warship/submarine) are handled by their own systems.
 const STRUCTURE_TYPES = ['city', 'port', 'defense', 'silo', 'sam', 'lab', 'factory', 'mine', 'artillery', 'repair', 'airport'];
@@ -41,7 +41,8 @@ const DEFAULT_SETTINGS = {
   startingGold: 0,
   percentToWin: 80,
   // ---- the options page ----
-  mode: 'ffa',                 // ffa | teams  (zombie is coming next)
+  mode: 'ffa',                 // ffa | teams | zombie
+  zombieDifficulty: 'medium',  // zombie mode: easy | medium | hard | nightmare (the horde's strength)
   teams: '2',                  // '2'..'7' | 'duos' | 'trios' | 'quads' | 'hvn' (humans vs nations)
   nationsDefault: false,       // use every nation the map defines
   randomSpawn: false,
@@ -81,12 +82,13 @@ function sanitizeSettings(input, isValidMapId) {
   s.percentToWin = Math.round(num(input.percentToWin, 30, 100, 80));
   // ---- the options page (numbers arrive as a checkbox + a value, OpenFront style) ----
   const on = (k) => input[k] === true || input[k] === 'true' || input[k] === 'on';
-  s.mode = input.mode === 'teams' ? 'teams' : 'ffa';
+  s.mode = input.mode === 'teams' ? 'teams' : input.mode === 'zombie' ? 'zombie' : 'ffa';
+  s.zombieDifficulty = ['easy', 'medium', 'hard', 'nightmare'].includes(input.zombieDifficulty) ? input.zombieDifficulty : 'medium';
   s.teams = TEAM_SPECS.includes(String(input.teams)) ? String(input.teams) : '2';
   s.nationsDefault = !!input.nationsDefault;
   s.randomSpawn = !!input.randomSpawn;
   s.waterNukes = !!input.waterNukes;
-  s.doomsdayClock = !!input.doomsdayClock;
+  s.doomsdayClock = !!input.doomsdayClock && s.mode !== 'zombie';   // the horde is the clock in zombie mode
   s.maxTimerOn = on('maxTimerOn'); s.maxTimer = Math.round(num(input.maxTimer, 1, 120, 30));
   s.maxTimerMinutes = s.maxTimerOn ? s.maxTimer : 0;
   s.goldMultOn = on('goldMultOn'); s.goldMult = num(input.goldMult, 0.1, 100, 2);
@@ -169,6 +171,12 @@ class Config {
   // Extra difficulty on the defender's own border tiles inside a post's range, on top of the radius
   // bonus above. These are the tiles the client draws with the fortified border colour.
   defensePostBorderBonus() { return 1.5; }
+  // Walls and defense posts work together: a wall that starts or ends on one of your posts, and is no
+  // longer than this, is 30% cheaper - so posts want to sit within this distance of each other and be
+  // joined up. Wall tiles inside a post's range are as much harder to break as a border tile there.
+  wallLinkMaxLength() { return 50; }
+  wallLinkDiscount() { return 0.7; }
+  wallPostSnap() { return 6; }
   // A post only shells ships if it can see the sea. Anything further inland than this is a land fort.
   defensePostCoastRange() { return 6; }
   // Coastal guns harass ships, they don't sink them: a fraction of a warship's health per shell.
@@ -505,6 +513,8 @@ class Config {
     }
     // A mech nearby digs in the ground it stands on, the same way a defense post does.
     if (defender !== null && input.defenderHasMech) { mag *= this.mechDefenseBonus(); tileCost *= this.mechSpeedPenalty(); }
+    // zombie ground: the dead are thick on it (zombie mode)
+    if (defender !== null && input.zombieDefense) mag *= input.zombieDefense;
     // ...and on the attack it is the spearhead: troops pushing past their own mech break through.
     if (defender !== null && input.attackerHasMech) { mag *= this.mechSpearheadLoss(); tileCost /= this.mechSpearheadSpeed(); }
     if (input.falloutRatio !== null) { const f = this.falloutDefenseModifier(input.falloutRatio); mag *= f; tileCost *= f; }

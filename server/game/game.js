@@ -94,6 +94,11 @@ class Player {
     this.deathTick = 0;
     this.allies = new Set();
     this.team = 0;                 // team games: the team this player is dealt into
+    this.borrowed = new Map();     // doctrine id -> lender smallID: doctrines an ally is lending us (see sharing.js)
+    this.samples = 0;              // zombie mode: zombie land taken back (the cure needs them)
+    this.cureStep = 0;             // zombie mode: cure steps finished (0-3)
+    this.cure = null;              // zombie mode: the cure step in the lab right now
+    this.isHorde = false;
     this.allianceSince = new Map(); // id -> tick the alliance was made (for alliances that expire)
     this.doomedAt = 0;             // doomsday clock: tick this player's side fell under the bar
     this.traitorUntil = 0;
@@ -127,7 +132,7 @@ class Player {
   }
   get numTiles() { return this.tiles.size; }
   get alive() { return this.spawned && this.tiles.size > 0; }
-  researchCount() { return this.researches.size + (this.research ? 1 : 0); }
+  researchCount() { return this.researches.size - this.borrowed.size + (this.research ? 1 : 0); }   // loans don't use up a slot
   isTraitor() { return this.game.tick < this.traitorUntil; }
   isFriendly(other) { return other === this || this.allies.has(other.id) || (this.team !== 0 && this.team === other.team); }
   unitsOf(type) { return this.units.filter((u) => u.type === type); }
@@ -246,6 +251,7 @@ class Game {
     this.nukes = [];
     this.bombers = [];
     this.allianceRequests = new Map();
+    this.shareRequests = new Map();
     this.events = [];
     this.changedTiles = [];
     this.unitsChanged = true;
@@ -342,6 +348,7 @@ class Game {
       p.ai = new BotAI(this, p, (hashString(p.id) ^ this.map.seed) >>> 0);
     }
     this.assignTeams();
+    this.createHorde();
   }
   player(id) { return this.playersById.get(id) || null; }
 
@@ -452,9 +459,10 @@ class Game {
     for (let k = 0; k < n; k++) this.updateBorder(b[k]);
     const u = this.unitByTile.get(tile);
     if (u && u.owner !== p) {
-      if (u.type === UnitType.DEFENSE_POST || u.type === UnitType.MINE) this.removeUnit(u);
+      if (u.type === UnitType.DEFENSE_POST || u.type === UnitType.MINE || p.isHorde) this.removeUnit(u);   // the dead don't run cities
       else this.transferUnit(u, p);
     }
+    if (this.horde && prevSm === this.horde.smallID && !p.isHorde) this.onReclaim(p);
   }
   relinquish(tile) {
     const prevSm = this.owner[tile];
@@ -581,7 +589,7 @@ class Game {
     }
     this.pathBudget = 3;
     for (const p of this.players) {
-      if (!p.alive) continue;
+      if (!p.alive || p.isHorde) continue;   // the horde grows by its own rules (zombies.js)
       p.addTroops(this.config.troopIncreaseRate(p));
       const g = this.config.goldAdditionRate(p, p.isAttacking(), this.tick);
       p.goldRate = g;
@@ -627,15 +635,18 @@ class Game {
     // give the nation AIs a look at what just happened, so they can remember it
     if (this.events.length) for (const pl of this.players) if (pl.alive && pl.ai && pl.ai.note) pl.ai.note(this.events);
     this.expireAllianceRequests();
+    this.tickSharing();
     for (const p of this.players) if (p.ai && p.alive) p.ai.tick();
     this.checkDeaths();
+    this.tickZombies();
+    this.tickCure();
     this.tickAllianceExpiry();
     this.tickDoomsday();
     if (this.tick % 10 === 0) this.checkWin();
   }
   endSpawnPhase() {
     for (const p of this.players) {
-      if (!p.spawned) {
+      if (!p.spawned && !p.isHorde) {   // the horde rises later, from its hives (zombies.js)
         const t = this.randomSpawnTile(p.type === PlayerType.HUMAN ? 10 : this.config.minDistanceBetweenPlayers(), p.nationSpawn);
         if (t !== null) this.spawn(p, t);
       }
@@ -647,6 +658,7 @@ class Game {
     for (const p of this.players) {
       if (p.spawned && p.tiles.size === 0 && p.deathTick === 0) {
         p.deathTick = this.tick;
+        for (const q of this.players) if (q !== p) { if (this.lentTo(p, q)) this.endLoan(p, q, 'fallen'); if (this.lentTo(q, p)) this.endLoan(q, p, 'fallen'); }
         for (const a of p.outgoingAttacks) a.done = true;
         for (const u of [...p.units]) this.removeUnit(u);
         for (const m of p.mechs) m.done = true;
@@ -660,6 +672,14 @@ class Game {
   // A side (a team, or a lone nation/player) wins by holding the land needed (see modes.js: overtime and
   // game length change that). The last one standing also wins; if only tribes are left, the biggest does.
   checkWin() {
+    if (this.isZombieGame()) {
+      // zombie mode ends on its own schedule (zombies.js); holding the land needed still wins outright
+      this.checkZombieDefeat();
+      if (this.phase === 'over') return;
+      const top = this.sides().sort((a, b) => b.tiles - a.tiles)[0];
+      if (top && top.tiles >= this.winPercent() / 100 * this.numLand) { if (this.zombie.phase === 'outbreak') this.endApocalypse('dominated'); this.finishZombieGame(); }
+      return;
+    }
     let side = this.modeWinner();
     if (!side) {
       const alive = this.players.filter((p) => p.alive);
@@ -883,10 +903,14 @@ class Game {
         if (!onBorder) continue;
         // Walls: grind the segment down; tiles behind it stay unreachable until it falls.
         if (this.wallHp[tile] > 0) {
-          const wallMult = target ? R.wallDamageMultiplier(target) : 1;
+          let wallMult = target ? R.wallDamageMultiplier(target) : 1;
+          if (attacker.isHorde) wallMult *= this.zombieWallMult();   // zombies barely scratch a wall
+          // a defense post covering the wall makes it as much harder to break as a border tile there
+          const postCover = target && this.hasDefensePostNearby(target, tile) ? cfg.defensePostBorderBonus() : 1;
+          wallMult /= postCover;
           const dmg = Math.min(this.wallHp[tile], (300 + troops * 0.02) * wallMult);
           this.wallHp[tile] -= dmg;
-          troops -= dmg * 0.02;
+          troops -= dmg * 0.02 * postCover * postCover;
           a.troops = troops;
           tickBudget -= 0.5;
           if (this.wallHp[tile] <= 0) { this.clearWallTile(tile); a.heap.push(tile, this.tick); a.border.add(tile); }
@@ -917,15 +941,23 @@ class Game {
           isDefenderBorder: target ? target.border.has(tile) : false,
           defenderHasMech: target ? this.hasMechNearby(target, tile) : false,
           attackerHasMech: target ? this.hasMechNearby(attacker, tile, this.config.mechSpearheadRange(), true) : false,
+          zombieDefense: target && target.isHorde ? this.zombieDefenseMult(tile) : 0,
           falloutRatio: this.fallout[tile] ? this.numFallout / this.numLand : null,
           borderSize,
           attackSpeedMult: speedMult,
           attackerLossMult: lossMult,
         });
         tickBudget -= res.tickFraction;
-        troops -= res.attackerTroopLoss;
+        // cure step 2: your troops fighting the horde lose far fewer
+        const zLoss = target && target.isHorde && attacker.cureStep >= 2 ? 0.65 : 1;
+        troops -= res.attackerTroopLoss * zLoss;
         a.troops = troops;
         if (target) target.removeTroops(res.defenderTroopLoss);
+        // the living who die fighting the dead rise again
+        if (this.horde) {
+          if (target === this.horde) this.zombieConvert(attacker, res.attackerTroopLoss * zLoss);
+          else if (attacker === this.horde && target) this.zombieConvert(target, res.defenderTroopLoss);
+        }
         const mech = target ? this.mechAtTile(tile) : null;
         if (mech && mech.owner === target) { // troops overrunning a mech chip it and get mauled
           mech.hp -= troops * 0.002;
@@ -993,6 +1025,7 @@ class Game {
   // ---- alliances ------------------------------------------------------------------
   requestAlliance(from, to) {
     if (!from.alive || !to.alive || from === to) return false;
+    if (from.isHorde || to.isHorde) return false;   // the dead make no deals
     if (this.isTeamGame() && from.team !== to.team) return false;   // team games: your team is your alliance
     if (from.allies.has(to.id)) return false;
     const key = `${from.id}|${to.id}`;
@@ -1025,6 +1058,7 @@ class Game {
     if (!breaker.allies.has(other.id)) return false;
     breaker.allies.delete(other.id); other.allies.delete(breaker.id);
     breaker.allianceSince.delete(other.id); other.allianceSince.delete(breaker.id);
+    this.endSharing(breaker, other);
     breaker.traitorUntil = this.tick + this.config.traitorDurationTicks();
     other.updateRelation(breaker, -100);
     this.events.push({ k: 'betrayed', by: breaker.smallID, p: other.smallID });
@@ -1036,6 +1070,7 @@ class Game {
   declareWar(p, target) {
     if (!p.alive || !target || !target.alive || target === p) return { ok: false, reason: 'Nobody to declare war on' };
     if (p.isFriendly(target)) return { ok: false, reason: `You are allied with ${target.name} - break the alliance first` };
+    if (target.isHorde) return { ok: false, reason: 'You are already at war with the dead' };
     if (p.warsDeclared.has(target.smallID)) return { ok: false, reason: `You are already at war with ${target.name}` };
     p.warsDeclared.set(target.smallID, this.tick);
     target.updateRelation(p, -60);
@@ -1106,7 +1141,7 @@ class Game {
       width: this.width, height: this.height, numLand: this.numLand, mapName: this.map.name,
       terrain: this.b64(this.terrain), owner: this.b64(this.owner), fallout: this.b64(this.fallout), walls: this.b64(this.wallHp),
       players: this.players.map((p) => this.playerInfo(p)),
-      stats: this.statsPacket(), units: this.unitsPacket(viewer), mechs: this.mechsPacket(), rails: this.railsPacket(), roads: this.roadsPacket(), teams: this.teamsPacket(), winnerTeam: this.winnerTeam || 0,
+      stats: this.statsPacket(), units: this.unitsPacket(viewer), mechs: this.mechsPacket(), rails: this.railsPacket(), roads: this.roadsPacket(), teams: this.teamsPacket(), winnerTeam: this.winnerTeam || 0, zombie: this.zombiePacket(), history: this.phase === 'over' ? this.historyPacket() : null,
       research: RESEARCH, settings: this.settings, winner: this.winner ? this.winner.smallID : 0,
     };
   }
@@ -1117,7 +1152,7 @@ class Game {
       (p.spawned ? 1 : 0) | (p.alive ? 2 : 0) | (p.isTraitor() ? 4 : 0) | (p.disconnected ? 8 : 0),
       Math.floor(cfg.maxTroops(p)), [...p.allies].map((id) => this.player(id)?.smallID || 0).concat(p.team ? this.players.filter((q) => q !== p && q.team === p.team).map((q) => q.smallID) : []),
       Math.floor(p.alive ? cfg.troopIncreaseRate(p) * TICKS_PER_SECOND : 0),
-      [[...p.researches], p.research ? [p.research.id, Math.max(0, p.research.doneTick - this.tick), Math.max(1, p.research.doneTick - (p.research.startTick ?? this.tick))] : null, null],
+      [[...p.researches], p.research ? [p.research.id, Math.max(0, p.research.doneTick - this.tick), Math.max(1, p.research.doneTick - (p.research.startTick ?? this.tick))] : null, this.borrowedPacket(p)],
       this.attackPower(p), this.economyPower(p), p.numWallTiles, p.mechs.length,
       p.warships.filter((w) => !w.done).length, p.subs.filter((s) => !s.done).length,
       Math.floor(this.troopsDeployed(p)),
@@ -1125,6 +1160,7 @@ class Game {
       this.incomePacket(p),
       [...p.warsDeclared.keys()], this.powerPacket(p),
       p.team, p.doomedAt ? Math.floor((this.tick - p.doomedAt) / 10) : -1,
+      this.zombie ? this.curePacket(p) : null,
     ]);
   }
   // Where this nation's money comes from, per second: the passive parts exactly, the lumpy ones
@@ -1192,8 +1228,8 @@ class Game {
     ]);
   }
   r1(v) { return Math.round(v * 10) / 10; }
-  boatsPacket() { return this.boats.filter((b) => !b.done).map((b) => [b.id, b.owner.smallID, this.r1(b.x), this.r1(b.y), Math.floor(b.troops), b.target ? b.target.smallID : 0]); }
-  tradePacket() { return this.tradeShips.filter((s) => !s.done).map((s) => [s.id, s.owner.smallID, this.r1(s.x), this.r1(s.y)]); }
+  boatsPacket() { return this.boats.filter((b) => !b.done).map((b) => [b.id, b.owner.smallID, this.r1(b.x), this.r1(b.y), Math.floor(b.troops), b.target ? b.target.smallID : 0, b.infected ? 1 : 0]); }
+  tradePacket() { return this.tradeShips.filter((s) => !s.done).map((s) => [s.id, s.owner.smallID, this.r1(s.x), this.r1(s.y), s.infected ? 1 : 0]); }
   shipsPacket(viewer) {
     const out = [];
     for (const w of this.warships) if (!w.done) out.push([w.id, 'warship', w.owner.smallID, this.r1(w.x), this.r1(w.y), Math.round(w.hp), w.maxHp || this.config.warshipHp(), w.patrol, 0, 0, w.level || 1, w.refit ? 1 : 0]);
@@ -1225,7 +1261,7 @@ class Game {
       this.changedTiles.length = 0;
     }
     const pkt = { t: 'tick', tick: this.tick, phase: this.phase, tiles };
-    if (this.events.length) { pkt.events = this.events; this.events = []; }
+    if (this.events.length) { this.recordHistory(this.events); pkt.events = this.events; this.events = []; }
     if (this.tick % 5 === 0 || this.phase === 'over') pkt.stats = this.statsPacket();
     if (this.attacks.length) pkt.attacks = this.attacksPacket();   // every tick: the marker has to glide
     else if (this.tick % 5 === 0) pkt.attacks = [];
@@ -1241,8 +1277,9 @@ class Game {
     if (this.railsChanged) { pkt.rails = this.railsPacket(); this.railsChanged = false; }
     if (this.roadsChanged) { pkt.roads = this.roadsPacket(); this.roadsChanged = false; }
     if (this.phase === 'spawn') pkt.spawnLeft = this.spawnTicks - this.tick;
-    if (this.phase === 'over') { pkt.winner = this.winner ? this.winner.smallID : 0; pkt.winnerTeam = this.winnerTeam || 0; }
+    if (this.phase === 'over') { pkt.winner = this.winner ? this.winner.smallID : 0; pkt.winnerTeam = this.winnerTeam || 0; if (!this.historySent) { this.historySent = true; pkt.history = this.historyPacket(); } }
     if (this.settings.doomsdayClock && this.tick % 10 === 0) pkt.doom = Math.round(this.doomBar() * 1000) / 10;
+    if (this.zombie && (this.tick % 10 === 0 || this.phase === 'over')) pkt.zombie = this.zombiePacket();
     if (this.tick % 10 === 0 && this.settings.overtimeMinutes > 0) pkt.winPct = this.winPercent();
     const reqs = [];
     for (const r of this.allianceRequests.values()) if (r.to.type === PlayerType.HUMAN) reqs.push([r.from.smallID, r.to.id]);
@@ -1252,6 +1289,6 @@ class Game {
 }
 
 // ---- mix in the other systems ----
-Object.assign(Game.prototype, require('./units'), require('./navy'), require('./rails'), require('./mechs'), require('./nukes'), require('./air'), require('./refit'), require('./inspect'), require('./intel'), require('./modes'));
+Object.assign(Game.prototype, require('./units'), require('./navy'), require('./rails'), require('./mechs'), require('./nukes'), require('./air'), require('./refit'), require('./inspect'), require('./intel'), require('./modes'), require('./sharing'), require('./history'), require('./zombies'));
 
 module.exports = { Game, Player, PlayerType, UnitType, NukeType, newId };

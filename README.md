@@ -65,6 +65,14 @@ Open <http://localhost:3000>, pick a name, **Create game**, choose a map, **Star
   * **Missile Silo** — launches atom / hydrogen bombs (90-tick reload) and, with the research,
     Bomber strikes.
   * **SAM Launcher** — shoots down incoming nukes within 70 tiles.
+* **Walls and defense posts work together.** A wall that starts or ends on one of your Defense Posts
+  (an end drawn within 6 tiles of a post snaps onto it) and is no longer than **50 tiles** costs
+  **30% less** — so posts want to sit within 50 tiles of each other and be joined up. Wall tiles inside a
+  post's 30-tile range are 1.5× harder to break, the same bonus the border gets there. While you place a
+  post or draw a wall, gold rings show each of your posts' 50-tile reach (like the SAM rings when you aim a
+  nuke), and the wall's price label says whether the discount applies. The AI rings the places where it
+  keeps most of its buildings with posts — the side facing trouble first — and then, slowly, joins them
+  with discounted walls, paid out of a wall fund it feeds with a slice of its income.
 * **Walls** (key **8**) — click-and-drag on your own land to draw a polyline; the server turns it
   into a **3-tile-thick** wall that **snaps to the coast** when you end near it. Walls are the
   slowest build: each block goes up one after another. Enemy attacks must grind each tile's HP
@@ -208,9 +216,57 @@ Open <http://localhost:3000>, pick a name, **Create game**, choose a map, **Star
   and it **drops while that nation's forces are away fighting**. **ECONOMY** = gold per second from
   base, land, Cities, trade ships, trains, conquest and plunder. **Hover either number** — on any
   nation, AI or human — for the full breakdown, including peace-dividend and war penalties.
+* **Sharing research** — allies can lend each other doctrines. On an ally's card (or the radial on
+  their land) **Ask to borrow a doctrine** lists theirs you lack; **Lend them a doctrine** lists yours they
+  lack. Each of you lends the other at most one at a time. A loan works exactly like your own research, but
+  the lender can **take it back at any moment** (no penalty), you can **hand it back**, and it goes home by
+  itself if the alliance ends. It doesn't use up one of your research slots, and if you research the same
+  doctrine yourself it becomes yours for good. The AI lends economy and defence doctrines to allies it likes
+  as a sign of friendship (war doctrines only to allies weaker than itself), asks allies for doctrines that
+  answer what it faces, and takes loans back from allies it is about to turn on. An ally that lends it a
+  doctrine gets a little more patience before it considers betrayal.
+* **World history** — the game-over screen tells the story of the game: every alliance, betrayal, war and
+  peace, the first bomb each nation dropped on another, who fell and to whom, loans of doctrines, and in
+  Zombie mode the outbreaks, great waves, burned hives and the cure, each stamped with the game clock.
 * **Alliances** — request from a player's radial or the leaderboard. Allies can't attack each other,
   can donate troops/gold, and earn 75% more from trade ships sent to each other. Breaking one marks you a **traitor** for 30s (weaker defense). Nuking
   an ally breaks the alliance.
+* **Zombie mode** — pick it on the options page, with four horde strengths: **Shamblers**,
+  **Outbreak**, **Pandemic**, **Extinction** (2–5 hives, 25–40 minutes to survive). It borrows from zombie
+  games: patient-zero hives in the wilderness (Warcraft III zombie maps, Plague Inc), announced great waves
+  and a final wave from every direction (They Are Billions), noise that draws the horde, infected ships
+  that carry the plague overseas (Plague Inc), and scavenging infected land (Infection Free Zone).
+  * **The calm** — 1.5 to 3 minutes after the spawn to expand, wall up and get a lab going.
+  * **The outbreak** — hives open in the wilderness, as far from everyone as possible and spread over the
+    continents people live on. **The Horde** is a player of its own: it spreads like an attack that belongs to
+    nobody, into empty land and into every living neighbour. It is sized against the living (the stronger
+    the world, the bigger the horde), and **troops that die fighting it rise and join it**.
+  * **Creep** — wherever the living touch zombie land, the infection creeps over the border a tile at a
+    time. Walls, defense posts, a mech's hold zone and (cure step 1) your cities' surroundings stop it.
+    **Zombies barely scratch walls**, so walling up works.
+  * **Across the sea** — a transport or trade ship leaving from near zombie land may be infected (ringed in
+    green) and starts a new outbreak where it lands; the horde sends rafts at the nearest living coast
+    (warships sink them); living hives send spores to other continents every few minutes. Nowhere is safe for
+    long, which is why the plague has to be fought, not just waited out.
+  * **Great waves** — every few minutes the horde picks a nation (bombs and big battles make noise and draw
+    it), announces a great wave 30 seconds ahead (a green ring and countdown on the map) and throws a flood of
+    the dead at it. A minute before the clock runs out the final wave comes from every direction.
+  * **Taking it back** — every zombie tile you reclaim pays salvage gold and gives a **sample**; burning a
+    hive (taking its tile) gives 150 samples and 400K gold and slows the horde. Ground near a living hive is
+    much harder to take.
+  * **The cure** — three steps researched in your labs, alongside your doctrines (3, 5 and 8 minutes at a
+    level-1 lab; steps 2 and 3 need samples). Step 1: creep can't take ground near your cities and fewer of
+    your dead rise. Step 2: your dead don't rise at all and your attacks on the horde lose far fewer troops.
+    Step 3: **the first nation to finish it cures the world.**
+  * **The end** — when the horde is cured, wiped out, or the clock runs out, its land rots back to empty
+    ground and there are 5 minutes of land rush. Two results: **everyone still standing survived**, and the
+    **strongest survivor** (land first, then troops, gold, buildings, and what it did against the plague;
+    +1500 for curing the world) wins outright. If nobody survives, the dead inherit the earth.
+  * **The AI** plays a different game while the dead walk: it allies with anyone who hasn't betrayed it,
+    doesn't betray and leaves other nations alone unless attacked, walls and posts the side facing the horde
+    first, pushes into zombie land for samples and hives when it has the troops, researches the cure before
+    any doctrine, drops its bombs on hives, sends troops to allies being overrun and builds warships against
+    rafts. After the plague it goes back to its usual self — the land rush is on.
 * **Win** by owning 80% of the land (configurable). Any player squeezed under 100 tiles is
   conquered outright — the attacker takes their land and gold.
 
@@ -306,7 +362,7 @@ The lobby's options page works like OpenFront's host screen: cards and switches,
 
 * **Map** — a card per map. **Difficulty** — Easy to Impossible (start troops, growth, reaction speed,
   targeting, how often the AI looks at its rivals and how early it strikes).
-* **Mode** — **Free for all**, **Teams**, or **Zombie** (shown as "coming next"). Teams can be 2–7 teams,
+* **Mode** — **Free for all**, **Teams**, or **Zombie** (with its own horde-strength picker). Teams can be 2–7 teams,
   Duos / Trios / Quads (teams of 2, 3, 4) or **Humans vs Nations**. Humans are spread across teams
   first, then nations fill in; tribes stay on their own. Teammates are permanent allies (no attacking,
   nothing to break), there are no alliances across teams, members share their team's colour, the
@@ -349,6 +405,9 @@ server/game/ai.js      Nation AI (research-driven; factories, mechs + standing o
                        word memory of every rival) and bot AI
 server/game/intel.js   The AI vocabulary: what a nation looks like from outside, as words
 server/game/modes.js   Teams, random spawn, doomsday clock, game length / overtime, alliance duration, disabled units
+server/game/zombies.js Zombie mode: the horde, hives, creep, waves, rafts, infected ships, the cure, the final count
+server/game/sharing.js Allies lending each other doctrines
+server/game/history.js The world history shown on the game-over screen
 public/                Client: menu/lobby UI, canvas renderer, radial menu, research picker, input
 public/assets/         OpenFront icons & sprites (CC BY-SA 4.0)
 server/maps/           Five bundled OpenFront maps (CC BY-SA 4.0)

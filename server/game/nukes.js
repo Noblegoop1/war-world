@@ -57,6 +57,7 @@ module.exports = {
       }
     } else this.spawnNuke(p, type, c.from.x, c.from.y, this.x(tile), this.y(tile), tile);
     this.events.push({ k: 'nuke', type, by: p.smallID, tile, target: this.owner[tile] });
+    this.noteNoise(p, type === NukeType.HYDROGEN ? 600 : 300);   // zombie mode: the horde hears bombs
     return c;
   },
   spawnNuke(p, type, sx, sy, tx, ty, tile) {

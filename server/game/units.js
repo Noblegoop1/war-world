@@ -299,12 +299,27 @@ module.exports = {
     }
     return out;
   },
-  // Turn a drawn polyline (waypoints) into the exact 3-thick tile set, with coast snapping at both ends.
+  // Your own finished defense post within `r` tiles of a tile (nearest), or null.
+  postNear(p, tile, r) {
+    let best = null, bd = r * r + 1;
+    for (const u of p.units) {
+      if (u.type !== UnitType.DEFENSE_POST || u.constructionLeft > 0) continue;
+      const d = (this.x(u.tile) - this.x(tile)) ** 2 + (this.y(u.tile) - this.y(tile)) ** 2;
+      if (d < bd) { bd = d; best = u; }
+    }
+    return best;
+  },
+  // Turn a drawn polyline (waypoints) into the exact 3-thick tile set. An end drawn near one of your
+  // defense posts snaps onto the post (and the wall is linked to it); otherwise ends snap to the coast.
   planWall(p, waypoints, snap = true) {
     if (!Array.isArray(waypoints) || !waypoints.length) return { ok: false, reason: 'Bad wall' };
     const pts = waypoints.map(Number).filter((t) => Number.isInteger(t) && t >= 0 && t < this.terrain.length).slice(0, 200);
     if (!pts.length) return { ok: false, reason: 'Bad wall' };
-    if (snap) { pts[0] = this.snapWallEndpoint(p, pts[0]); pts[pts.length - 1] = this.snapWallEndpoint(p, pts[pts.length - 1]); }
+    const snapR = this.config.wallPostSnap();
+    const startPost = this.postNear(p, pts[0], snapR), endPost = pts.length > 1 ? this.postNear(p, pts[pts.length - 1], snapR) : null;
+    if (startPost) pts[0] = startPost.tile;
+    if (endPost) pts[pts.length - 1] = endPost.tile;
+    if (snap) { if (!startPost) pts[0] = this.snapWallEndpoint(p, pts[0]); if (!endPost) pts[pts.length - 1] = this.snapWallEndpoint(p, pts[pts.length - 1]); }
     const spine = [];
     for (let i = 0; i < pts.length; i++) {
       if (i === 0) { spine.push(pts[0]); continue; }
@@ -323,7 +338,11 @@ module.exports = {
     let cost = 0;
     let n = p.numWallTiles + p.wallQueue.reduce((s, b) => s + b.tiles.length, 0);
     for (const t of tiles) { cost += this.config.wallTileCost(n++, p); void t; }
-    return { ok: true, cost: Math.floor(cost), tiles: [...tiles], blocks, spine };
+    // linked to a defense post and short enough: 30% off
+    const linked = !!(startPost || endPost) && spine.length <= this.config.wallLinkMaxLength();
+    const full = Math.floor(cost);
+    if (linked) cost *= this.config.wallLinkDiscount();
+    return { ok: true, cost: Math.floor(cost), fullCost: full, linked, joins: startPost && endPost && startPost !== endPost, postEnds: (startPost ? 1 : 0) + (endPost ? 1 : 0), length: spine.length, tiles: [...tiles], blocks, spine };
   },
   buildWall(p, waypoints) {
     if (!p.alive) return { ok: false, reason: 'dead' };
@@ -414,6 +433,7 @@ module.exports = {
     for (const p of this.players) {
       if (!p.alive) continue;
       if (p.research && this.tick >= p.research.doneTick) {
+        this.onDoctrineResearched(p, p.research.id);
         p.researches.add(p.research.id);
         this.events.push({ k: 'researchDone', p: p.smallID, id: p.research.id });
         p.research = null;

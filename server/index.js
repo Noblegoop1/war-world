@@ -371,7 +371,7 @@ class Lobby {
       case 'wallQuote': {
         const tiles = Array.isArray(m.tiles) ? m.tiles.slice(0, 200).map(Number) : [];
         const r = g.planWall(p, tiles);
-        c.send({ t: 'wallQuote', ok: r.ok, cost: r.ok ? r.cost : 0, reason: r.reason || '', tiles: r.ok ? r.tiles : [], afford: r.ok ? p.gold >= r.cost : false });
+        c.send({ t: 'wallQuote', ok: r.ok, cost: r.ok ? r.cost : 0, fullCost: r.ok ? r.fullCost : 0, linked: !!r.linked, joins: !!r.joins, postEnds: r.postEnds || 0, length: r.length || 0, maxLink: g.config.wallLinkMaxLength(), reason: r.reason || '', tiles: r.ok ? r.tiles : [], afford: r.ok ? p.gold >= r.cost : false });
         break;
       }
       case 'research': {
@@ -388,6 +388,41 @@ class Lobby {
       case 'ally': {
         const o = g.playersBySmall[Number(m.p)];
         if (o && o !== p) { if (!g.requestAlliance(p, o)) c.send({ t: 'toast', msg: g.isTeamGame() ? 'Team games: your team is your alliance' : 'Alliance request not possible' }); }
+        break;
+      }
+      // ---- research sharing between allies ----
+      case 'cure': {             // zombie mode: start the next cure step in your best lab
+        const r = g.startCure(p);
+        c.send({ t: 'toast', msg: r.ok ? 'Cure research started' : r.reason, info: r.ok });
+        break;
+      }
+      case 'shareAsk': {        // ask ally m.p to lend us doctrine m.id
+        const o = g.playersBySmall[Number(m.p)];
+        if (!o || o === p) break;
+        const r = g.askDoctrine(p, o, String(m.id));
+        c.send({ t: 'toast', msg: r.ok ? `Asked ${o.name} to lend you that doctrine` : r.reason, info: r.ok });
+        break;
+      }
+      case 'shareReply': {      // answer ally m.p's ask
+        const o = g.playersBySmall[Number(m.p)];
+        if (o) g.answerDoctrine(p, o, !!m.accept);
+        break;
+      }
+      case 'shareLend': {       // lend ally m.p doctrine m.id
+        const o = g.playersBySmall[Number(m.p)];
+        if (!o || o === p) break;
+        const r = g.lendDoctrine(p, o, String(m.id));
+        if (!r.ok) c.send({ t: 'toast', msg: r.reason });
+        break;
+      }
+      case 'shareRevoke': {     // take back what we lend ally m.p
+        const o = g.playersBySmall[Number(m.p)];
+        if (o) { const r = g.endLoan(p, o, 'revoked'); if (!r.ok) c.send({ t: 'toast', msg: r.reason }); }
+        break;
+      }
+      case 'shareReturn': {     // hand back what ally m.p lends us
+        const o = g.playersBySmall[Number(m.p)];
+        if (o) { const r = g.endLoan(o, p, 'returned'); if (!r.ok) c.send({ t: 'toast', msg: r.reason }); }
         break;
       }
       case 'allyReply': {
